@@ -4,6 +4,7 @@ import UIKit
 struct SimulatorStreamView: View {
     @Bindable var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var touchIndicators: [StreamTouchIndicator] = []
     @State private var touchOverlayRemovalTask: Task<Void, Never>?
     @State private var presentedSheet: StreamSheet?
@@ -17,7 +18,29 @@ struct SimulatorStreamView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .background(NavigationPopGestureDisabler())
+        .overlay(alignment: .leading) {
+            if usesCompactBackControls {
+                CompactStreamBackSwipeLayer {
+                    model.hapticSelection()
+                    model.selectSimulator(nil)
+                }
+                .frame(width: 56)
+                .frame(maxHeight: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .ignoresSafeArea(edges: .leading)
+            }
+        }
         .toolbar {
+            if usesCompactBackControls {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        model.hapticSelection()
+                        model.selectSimulator(nil)
+                    } label: {
+                        Label("Simulators", systemImage: "chevron.left")
+                    }
+                }
+            }
             ToolbarItem(placement: .principal) {
                 StreamTitleButton(model: model) {
                     model.hapticSelection()
@@ -61,6 +84,10 @@ struct SimulatorStreamView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { notification in
             updateKeyboardHeight(notification)
         }
+    }
+
+    private var usesCompactBackControls: Bool {
+        horizontalSizeClass == .compact || UIDevice.current.userInterfaceIdiom == .phone
     }
 
     private func streamContent(usesSideControls: Bool) -> some View {
@@ -2053,6 +2080,93 @@ private final class NavigationPopGestureDisablerView: UIView {
                 return nil
             }
             .first
+    }
+}
+
+private struct CompactStreamBackSwipeLayer: UIViewRepresentable {
+    let onBack: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onBack: onBack)
+    }
+
+    func makeUIView(context: Context) -> CompactStreamBackSwipeView {
+        let view = CompactStreamBackSwipeView()
+        view.coordinator = context.coordinator
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = true
+        view.addGestureRecognizer(context.coordinator.panGestureRecognizer)
+        return view
+    }
+
+    func updateUIView(_ view: CompactStreamBackSwipeView, context: Context) {
+        context.coordinator.onBack = onBack
+        view.coordinator = context.coordinator
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onBack: () -> Void
+        private var didTriggerBack = false
+        lazy var panGestureRecognizer: UIPanGestureRecognizer = {
+            let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            recognizer.cancelsTouchesInView = true
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+            recognizer.minimumNumberOfTouches = 1
+            recognizer.maximumNumberOfTouches = 1
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        init(onBack: @escaping () -> Void) {
+            self.onBack = onBack
+        }
+
+        @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                didTriggerBack = false
+            case .changed, .ended:
+                guard !didTriggerBack else { return }
+                let translation = recognizer.translation(in: recognizer.view)
+                if translation.x > 86, abs(translation.y) < 80, translation.x > abs(translation.y) * 1.35 {
+                    didTriggerBack = true
+                    onBack()
+                }
+            case .cancelled, .failed:
+                didTriggerBack = false
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let view = gestureRecognizer.view,
+                  let pan = gestureRecognizer as? UIPanGestureRecognizer else {
+                return false
+            }
+            let location = gestureRecognizer.location(in: view)
+            let velocity = pan.velocity(in: view)
+            if location.x > 56 {
+                return false
+            }
+            return velocity.x >= 0 || abs(velocity.x) < 1
+        }
+    }
+}
+
+private final class CompactStreamBackSwipeView: UIView {
+    weak var coordinator: CompactStreamBackSwipeLayer.Coordinator?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        backgroundColor = .clear
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
     }
 }
 
