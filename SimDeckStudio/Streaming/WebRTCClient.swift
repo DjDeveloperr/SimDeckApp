@@ -579,7 +579,7 @@ final class WebRTCClient: NSObject {
               let phase = object["phase"] as? String else {
             return false
         }
-        return phase == "moved" && (type == "touch" || type == "edgeTouch" || type == "multiTouch")
+        return phase == "moved" && (type == "touch" || type == "edgeTouch")
     }
 
     private func sendPageVisibilityStats(visible: Bool, simulatorID: String) {
