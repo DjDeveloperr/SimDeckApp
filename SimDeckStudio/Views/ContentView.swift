@@ -4,6 +4,7 @@ import UIKit
 
 struct ContentView: View {
     @Bindable var model: AppModel
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var searchText = ""
     @State private var searchExpanded = false
 
@@ -14,7 +15,37 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
     private func navigationContent(usesSearchAccessory: Bool) -> some View {
+        if usesCompactRootNavigation {
+            NavigationStack {
+                if showsStreamDetail {
+                    SimulatorStreamView(model: model)
+                } else {
+                    SidebarView(
+                        model: model,
+                        searchText: $searchText,
+                        searchExpanded: $searchExpanded,
+                        usesSearchAccessory: usesSearchAccessory
+                    )
+                }
+            }
+        } else {
+            splitNavigationContent(usesSearchAccessory: usesSearchAccessory)
+        }
+    }
+
+    private var usesCompactRootNavigation: Bool {
+        horizontalSizeClass == .compact || UIDevice.current.userInterfaceIdiom == .phone
+    }
+
+    private var showsStreamDetail: Bool {
+        model.endpoint != nil
+            && model.authEndpoint == nil
+            && model.selectedSimulator != nil
+    }
+
+    private func splitNavigationContent(usesSearchAccessory: Bool) -> some View {
         NavigationSplitView {
             SidebarView(
                 model: model,
@@ -23,9 +54,7 @@ struct ContentView: View {
                 usesSearchAccessory: usesSearchAccessory
             )
         } detail: {
-            if model.endpoint != nil,
-               model.authEndpoint == nil,
-               model.selectedSimulator != nil {
+            if showsStreamDetail {
                 SimulatorStreamView(model: model)
             } else {
                 Color.clear

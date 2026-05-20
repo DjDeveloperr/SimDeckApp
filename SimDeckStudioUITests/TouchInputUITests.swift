@@ -27,6 +27,29 @@ final class TouchInputUITests: XCTestCase {
     }
 
     func testControllerPinchAgainstConnectedSimulator() throws {
+        let app = try launchControllerApp()
+
+        let streamSurface = app.otherElements["touch-input-surface"].firstMatch
+        XCTAssertTrue(streamSurface.waitForExistence(timeout: 20), "Stream touch surface did not appear.")
+
+        streamSurface.pinch(withScale: 2.0, velocity: 1.0)
+        sleep(1)
+    }
+
+    func testStreamScreenIgnoresSystemBackSwipe() throws {
+        let app = try launchControllerApp()
+
+        let streamSurface = app.otherElements["touch-input-surface"].firstMatch
+        XCTAssertTrue(streamSurface.waitForExistence(timeout: 20), "Stream touch surface did not appear.")
+
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
+        start.press(forDuration: 0.08, thenDragTo: end)
+
+        XCTAssertTrue(streamSurface.waitForExistence(timeout: 2), "Stream screen popped after a horizontal swipe.")
+    }
+
+    private func launchControllerApp() throws -> XCUIApplication {
         let environment = ProcessInfo.processInfo.environment
         guard let launchURL = environment["SIMDECK_E2E_URL"] ?? environment["TEST_RUNNER_SIMDECK_E2E_URL"] else {
             throw XCTSkip("Set SIMDECK_E2E_URL to run the controller-to-target simulator pinch test.")
@@ -35,11 +58,6 @@ final class TouchInputUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--simdeck-e2e-controller", "--simdeck-open-url=\(launchURL)"]
         app.launch()
-
-        let streamSurface = app.otherElements["touch-input-surface"].firstMatch
-        XCTAssertTrue(streamSurface.waitForExistence(timeout: 20), "Stream touch surface did not appear.")
-
-        streamSurface.pinch(withScale: 2.0, velocity: 1.0)
-        sleep(1)
+        return app
     }
 }

@@ -399,26 +399,29 @@ struct SimulatorStreamView: View {
                 clearTouchOverlay()
                 return
             }
-            for point in event.points {
-                if let index = touchIndicators.firstIndex(where: { $0.id == point.id }) {
-                    touchIndicators[index].current = point.local
-                    touchIndicators[index].isEnding = true
-                } else {
-                    touchIndicators.append(
-                        StreamTouchIndicator(
-                            id: point.id,
-                            start: point.local,
-                            current: point.local,
-                            isEnding: true
+            withAnimation(.easeOut(duration: 0.16)) {
+                for point in event.points {
+                    if let index = touchIndicators.firstIndex(where: { $0.id == point.id }) {
+                        touchIndicators[index].isEnding = true
+                    } else {
+                        touchIndicators.append(
+                            StreamTouchIndicator(
+                                id: point.id,
+                                start: point.local,
+                                current: point.local,
+                                isEnding: true
+                            )
                         )
-                    )
+                    }
                 }
             }
             let endingIDs = Set(event.points.map(\.id))
             touchOverlayRemovalTask?.cancel()
             touchOverlayRemovalTask = Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(240))
-                withAnimation(.easeOut(duration: 0.16)) {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
                     touchIndicators.removeAll { endingIDs.contains($0.id) }
                 }
             }
@@ -962,14 +965,15 @@ private struct TouchInteractionOverlay: View {
         ZStack(alignment: .topLeading) {
             ForEach(indicators) { indicator in
                 Circle()
-                    .fill(.white.opacity(indicator.isEnding ? 0.18 : 0.36))
-                    .stroke(.white.opacity(indicator.isEnding ? 0.36 : 0.86), lineWidth: 2)
-                    .frame(width: indicator.isEnding ? 34 : 42, height: indicator.isEnding ? 34 : 42)
-                    .position(x: indicator.current.x, y: indicator.current.y)
+                    .fill(.white.opacity(0.36))
+                    .stroke(.white.opacity(0.86), lineWidth: 2)
+                    .frame(width: 42, height: 42)
                     .shadow(color: .black.opacity(0.3), radius: 7)
-                    .scaleEffect(indicator.isEnding ? 0.82 : 1)
+                    .opacity(indicator.isEnding ? 0 : 1)
+                    .scaleEffect(indicator.isEnding ? 0.72 : 1, anchor: .center)
+                    .position(x: indicator.current.x, y: indicator.current.y)
                     .animation(.interactiveSpring(response: 0.09, dampingFraction: 0.86), value: indicator.current)
-                    .animation(.easeOut(duration: 0.14), value: indicator.isEnding)
+                    .animation(.easeOut(duration: 0.16), value: indicator.isEnding)
             }
         }
         .compositingGroup()
