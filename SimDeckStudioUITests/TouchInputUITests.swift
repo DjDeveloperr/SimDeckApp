@@ -44,20 +44,27 @@ final class TouchInputUITests: XCTestCase {
         let streamSurface = app.otherElements["touch-input-surface"].firstMatch
         XCTAssertTrue(streamSurface.waitForExistence(timeout: 20), "Stream touch surface did not appear.")
 
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
-        start.press(forDuration: 0.08, thenDragTo: end)
+        for startX in [0.12, 0.35] {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: startX, dy: 0.5))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5))
+            start.press(forDuration: 0.08, thenDragTo: end)
 
-        XCTAssertTrue(streamSurface.waitForExistence(timeout: 2), "Stream screen popped after an interior horizontal swipe.")
+            XCTAssertTrue(
+                streamSurface.waitForExistence(timeout: 2),
+                "Stream screen popped after an interior horizontal swipe from \(startX)."
+            )
+        }
     }
 
-    func testCompactStreamBackControlsReturnToSimulatorList() throws {
+    func testCompactStreamBackButtonAndScreenEdgeSwipeReturnToSimulatorList() throws {
         var app = try launchControllerApp()
 
         var streamSurface = app.otherElements["touch-input-surface"].firstMatch
         XCTAssertTrue(streamSurface.waitForExistence(timeout: 20), "Stream touch surface did not appear.")
 
-        let backButton = app.buttons["Simulators"].firstMatch
+        let backButton = app.buttons.matching(
+            NSPredicate(format: "label IN %@", ["Back", "Simulators"])
+        ).firstMatch
         XCTAssertTrue(backButton.waitForExistence(timeout: 3), "Compact stream back button was missing.")
         backButton.tap()
         XCTAssertFalse(streamSurface.waitForExistence(timeout: 1), "Stream screen stayed open after tapping back.")
@@ -67,11 +74,11 @@ final class TouchInputUITests: XCTestCase {
         streamSurface = app.otherElements["touch-input-surface"].firstMatch
         XCTAssertTrue(streamSurface.waitForExistence(timeout: 20), "Stream touch surface did not appear.")
 
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
-        start.press(forDuration: 0.08, thenDragTo: end)
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.001, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5))
+        start.press(forDuration: 0, thenDragTo: end)
 
-        XCTAssertFalse(streamSurface.waitForExistence(timeout: 1), "Stream screen stayed open after an edge back swipe.")
+        XCTAssertFalse(streamSurface.waitForExistence(timeout: 1), "Stream screen stayed open after a phone-edge back swipe.")
     }
 
     private func launchControllerApp() throws -> XCUIApplication {

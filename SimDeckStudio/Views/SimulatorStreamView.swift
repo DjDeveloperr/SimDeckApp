@@ -4,7 +4,6 @@ import UIKit
 struct SimulatorStreamView: View {
     @Bindable var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var touchIndicators: [StreamTouchIndicator] = []
     @State private var touchOverlayRemovalTask: Task<Void, Never>?
     @State private var presentedSheet: StreamSheet?
@@ -17,30 +16,8 @@ struct SimulatorStreamView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .background(NavigationPopGestureDisabler())
-        .overlay(alignment: .leading) {
-            if usesCompactBackControls {
-                CompactStreamBackSwipeLayer {
-                    model.hapticSelection()
-                    model.selectSimulator(nil)
-                }
-                .frame(width: 56)
-                .frame(maxHeight: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .ignoresSafeArea(edges: .leading)
-            }
-        }
+        .background(NavigationPopGestureGate())
         .toolbar {
-            if usesCompactBackControls {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        model.hapticSelection()
-                        model.selectSimulator(nil)
-                    } label: {
-                        Label("Simulators", systemImage: "chevron.left")
-                    }
-                }
-            }
             ToolbarItem(placement: .principal) {
                 StreamTitleButton(model: model) {
                     model.hapticSelection()
@@ -84,10 +61,6 @@ struct SimulatorStreamView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { notification in
             updateKeyboardHeight(notification)
         }
-    }
-
-    private var usesCompactBackControls: Bool {
-        horizontalSizeClass == .compact || UIDevice.current.userInterfaceIdiom == .phone
     }
 
     private func streamContent(usesSideControls: Bool) -> some View {
@@ -1985,59 +1958,167 @@ private struct HardwareButtonHitArea: View {
     }
 }
 
-private struct NavigationPopGestureDisabler: UIViewRepresentable {
+private struct NavigationPopGestureGate: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
 
-    func makeUIView(context: Context) -> NavigationPopGestureDisablerView {
-        let view = NavigationPopGestureDisablerView()
+    func makeUIView(context: Context) -> NavigationPopGestureGateView {
+        let view = NavigationPopGestureGateView()
         view.coordinator = context.coordinator
         return view
     }
 
-    func updateUIView(_ view: NavigationPopGestureDisablerView, context: Context) {
+    func updateUIView(_ view: NavigationPopGestureGateView, context: Context) {
         view.coordinator = context.coordinator
         view.refreshPopGestureState()
     }
 
-    static func dismantleUIView(_ view: NavigationPopGestureDisablerView, coordinator: Coordinator) {
+    static func dismantleUIView(_ view: NavigationPopGestureGateView, coordinator: Coordinator) {
         coordinator.detach()
     }
 
     final class Coordinator {
-        private weak var gestureRecognizer: UIGestureRecognizer?
-        private var previousIsEnabled: Bool?
+        private struct GatedRecognizer {
+            weak var recognizer: UIGestureRecognizer?
+            weak var previousDelegate: UIGestureRecognizerDelegate?
+            let delegate: EdgePopGestureDelegate
+        }
+
+        private var gatedRecognizers: [ObjectIdentifier: GatedRecognizer] = [:]
 
         func attach(to navigationController: UINavigationController) {
-            guard let gestureRecognizer = navigationController.interactivePopGestureRecognizer else {
-                detach()
-                return
+            let popRecognizers = navigationPopGestureRecognizers(in: navigationController)
+
+            for recognizer in popRecognizers {
+                let id = ObjectIdentifier(recognizer)
+                if var gated = gatedRecognizers[id] {
+                    if recognizer.delegate !== gated.delegate {
+                        gated.previousDelegate = recognizer.delegate
+                        gated.delegate.previousDelegate = recognizer.delegate
+                        gatedRecognizers[id] = gated
+                        recognizer.delegate = gated.delegate
+                    }
+                } else {
+                    let delegate = EdgePopGestureDelegate(previousDelegate: recognizer.delegate)
+                    gatedRecognizers[id] = GatedRecognizer(
+                        recognizer: recognizer,
+                        previousDelegate: recognizer.delegate,
+                        delegate: delegate
+                    )
+                    recognizer.delegate = delegate
+                }
             }
 
-            if self.gestureRecognizer === gestureRecognizer {
-                gestureRecognizer.isEnabled = false
-                return
+            let activeIDs = Set(popRecognizers.map(ObjectIdentifier.init))
+            for id in Array(gatedRecognizers.keys) where !activeIDs.contains(id) {
+                restoreRecognizer(id: id)
             }
-
-            detach()
-            self.gestureRecognizer = gestureRecognizer
-            previousIsEnabled = gestureRecognizer.isEnabled
-            gestureRecognizer.isEnabled = false
         }
 
         func detach() {
-            if let gestureRecognizer {
-                gestureRecognizer.isEnabled = previousIsEnabled ?? true
+            for id in Array(gatedRecognizers.keys) {
+                restoreRecognizer(id: id)
             }
-            gestureRecognizer = nil
-            previousIsEnabled = nil
+        }
+
+        private func restoreRecognizer(id: ObjectIdentifier) {
+            guard let gated = gatedRecognizers.removeValue(forKey: id),
+                  let recognizer = gated.recognizer else {
+                return
+            }
+            if recognizer.delegate === gated.delegate {
+                recognizer.delegate = gated.previousDelegate
+            }
+        }
+
+        private func navigationPopGestureRecognizers(in navigationController: UINavigationController) -> [UIPanGestureRecognizer] {
+            let candidates = [navigationController.interactivePopGestureRecognizer].compactMap { $0 }
+                + (navigationController.view.gestureRecognizers ?? [])
+            let recognizers = candidates.compactMap { $0 as? UIPanGestureRecognizer }
+            return Array(
+                Dictionary(grouping: recognizers, by: ObjectIdentifier.init)
+                    .compactMap { $0.value.first }
+            )
         }
     }
 }
 
-private final class NavigationPopGestureDisablerView: UIView {
-    weak var coordinator: NavigationPopGestureDisabler.Coordinator?
+private final class EdgePopGestureDelegate: NSObject, UIGestureRecognizerDelegate {
+    weak var previousDelegate: UIGestureRecognizerDelegate?
+
+    private let activationWidth: CGFloat = 24
+
+    init(previousDelegate: UIGestureRecognizerDelegate?) {
+        self.previousDelegate = previousDelegate
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if previousDelegate?.gestureRecognizerShouldBegin?(gestureRecognizer) == false {
+            return false
+        }
+
+        guard let view = gestureRecognizer.view,
+              let panGestureRecognizer = gestureRecognizer as? UIPanGestureRecognizer else {
+            return false
+        }
+
+        let location = panGestureRecognizer.location(in: view)
+        guard location.x <= activationWidth else {
+            return false
+        }
+
+        let velocity = panGestureRecognizer.velocity(in: view)
+        guard velocity.x > 0, velocity.x > abs(velocity.y) else {
+            return false
+        }
+
+        return true
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        previousDelegate?.gestureRecognizer?(
+            gestureRecognizer,
+            shouldRecognizeSimultaneouslyWith: otherGestureRecognizer
+        ) ?? false
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        previousDelegate?.gestureRecognizer?(
+            gestureRecognizer,
+            shouldRequireFailureOf: otherGestureRecognizer
+        ) ?? false
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        previousDelegate?.gestureRecognizer?(
+            gestureRecognizer,
+            shouldBeRequiredToFailBy: otherGestureRecognizer
+        ) ?? false
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        previousDelegate?.gestureRecognizer?(gestureRecognizer, shouldReceive: touch) ?? true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive press: UIPress) -> Bool {
+        previousDelegate?.gestureRecognizer?(gestureRecognizer, shouldReceive: press) ?? true
+    }
+}
+
+private final class NavigationPopGestureGateView: UIView {
+    weak var coordinator: NavigationPopGestureGate.Coordinator?
+    private var refreshGeneration = 0
+    private var refreshTimer: Timer?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -2053,12 +2134,16 @@ private final class NavigationPopGestureDisablerView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        refreshPopGestureState()
+        if window == nil {
+            stopRefreshingPopGesture()
+        } else {
+            startRefreshingPopGesture()
+        }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        refreshPopGestureState()
+        schedulePopGestureRefresh()
     }
 
     func refreshPopGestureState() {
@@ -2066,6 +2151,40 @@ private final class NavigationPopGestureDisablerView: UIView {
             return
         }
         coordinator?.attach(to: navigationController)
+    }
+
+    deinit {
+        stopRefreshingPopGesture()
+    }
+
+    private func startRefreshingPopGesture() {
+        schedulePopGestureRefresh()
+        guard refreshTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.refreshPopGestureState()
+        }
+        refreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopRefreshingPopGesture() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        coordinator?.detach()
+    }
+
+    private func schedulePopGestureRefresh(attemptsRemaining: Int = 8) {
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self, self.refreshGeneration == generation else {
+                return
+            }
+            self.refreshPopGestureState()
+            if attemptsRemaining > 0 {
+                self.schedulePopGestureRefresh(attemptsRemaining: attemptsRemaining - 1)
+            }
+        }
     }
 
     private var navigationController: UINavigationController? {
@@ -2080,93 +2199,6 @@ private final class NavigationPopGestureDisablerView: UIView {
                 return nil
             }
             .first
-    }
-}
-
-private struct CompactStreamBackSwipeLayer: UIViewRepresentable {
-    let onBack: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onBack: onBack)
-    }
-
-    func makeUIView(context: Context) -> CompactStreamBackSwipeView {
-        let view = CompactStreamBackSwipeView()
-        view.coordinator = context.coordinator
-        view.backgroundColor = .clear
-        view.isUserInteractionEnabled = true
-        view.addGestureRecognizer(context.coordinator.panGestureRecognizer)
-        return view
-    }
-
-    func updateUIView(_ view: CompactStreamBackSwipeView, context: Context) {
-        context.coordinator.onBack = onBack
-        view.coordinator = context.coordinator
-    }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var onBack: () -> Void
-        private var didTriggerBack = false
-        lazy var panGestureRecognizer: UIPanGestureRecognizer = {
-            let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
-            recognizer.cancelsTouchesInView = true
-            recognizer.delaysTouchesBegan = false
-            recognizer.delaysTouchesEnded = false
-            recognizer.minimumNumberOfTouches = 1
-            recognizer.maximumNumberOfTouches = 1
-            recognizer.delegate = self
-            return recognizer
-        }()
-
-        init(onBack: @escaping () -> Void) {
-            self.onBack = onBack
-        }
-
-        @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
-            switch recognizer.state {
-            case .began:
-                didTriggerBack = false
-            case .changed, .ended:
-                guard !didTriggerBack else { return }
-                let translation = recognizer.translation(in: recognizer.view)
-                if translation.x > 86, abs(translation.y) < 80, translation.x > abs(translation.y) * 1.35 {
-                    didTriggerBack = true
-                    onBack()
-                }
-            case .cancelled, .failed:
-                didTriggerBack = false
-            default:
-                break
-            }
-        }
-
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            guard let view = gestureRecognizer.view,
-                  let pan = gestureRecognizer as? UIPanGestureRecognizer else {
-                return false
-            }
-            let location = gestureRecognizer.location(in: view)
-            let velocity = pan.velocity(in: view)
-            if location.x > 56 {
-                return false
-            }
-            return velocity.x >= 0 || abs(velocity.x) < 1
-        }
-    }
-}
-
-private final class CompactStreamBackSwipeView: UIView {
-    weak var coordinator: CompactStreamBackSwipeLayer.Coordinator?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isOpaque = false
-        backgroundColor = .clear
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        nil
     }
 }
 
@@ -2321,8 +2353,10 @@ private struct DeviceViewportLayout {
             let profileSize = CGSize(width: CGFloat(chromeProfile.totalWidth), height: CGFloat(chromeProfile.totalHeight))
             let shell = profileSize.aspectFit(in: viewport)
             let scale = shell.width / profileSize.width
-            let backingRect = Self.chromeBackingRect(profile: chromeProfile)
-            let contentRect = Self.chromeContentRect(profile: chromeProfile) ?? backingRect
+            let rawBackingRect = Self.chromeBackingRect(profile: chromeProfile)
+            let backingOverscan: CGFloat = 2
+            let backingRect = rawBackingRect.insetBy(dx: -backingOverscan, dy: -backingOverscan)
+            let contentRect = Self.chromeContentRect(profile: chromeProfile) ?? rawBackingRect
             shellFrame = shell
             chromeCoordinateScale = scale
             screenFrame = CGRect(
@@ -2345,9 +2379,9 @@ private struct DeviceViewportLayout {
             )
             screenBackingCornerRadius = Self.screenCornerRadius(
                 profile: chromeProfile,
-                profileScreenRect: backingRect,
+                profileScreenRect: rawBackingRect,
                 scale: scale
-            )
+            ) + backingOverscan * scale
             usesChrome = true
             return
         }

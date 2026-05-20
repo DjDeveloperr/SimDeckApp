@@ -19,15 +19,21 @@ struct ContentView: View {
     private func navigationContent(usesSearchAccessory: Bool) -> some View {
         if usesCompactRootNavigation {
             NavigationStack {
-                if showsStreamDetail {
-                    SimulatorStreamView(model: model)
-                } else {
-                    SidebarView(
-                        model: model,
-                        searchText: $searchText,
-                        searchExpanded: $searchExpanded,
-                        usesSearchAccessory: usesSearchAccessory
-                    )
+                SidebarView(
+                    model: model,
+                    searchText: $searchText,
+                    searchExpanded: $searchExpanded,
+                    usesSearchAccessory: usesSearchAccessory,
+                    onSelectSimulator: { udid in
+                        model.selectSimulator(udid)
+                    }
+                )
+                .navigationDestination(isPresented: compactStreamPresented) {
+                    if showsStreamDetail {
+                        SimulatorStreamView(model: model)
+                    } else {
+                        Color.clear
+                    }
                 }
             }
         } else {
@@ -43,6 +49,16 @@ struct ContentView: View {
         model.endpoint != nil
             && model.authEndpoint == nil
             && model.selectedSimulator != nil
+    }
+
+    private var compactStreamPresented: Binding<Bool> {
+        Binding {
+            showsStreamDetail
+        } set: { isPresented in
+            if !isPresented {
+                model.selectSimulator(nil)
+            }
+        }
     }
 
     private func splitNavigationContent(usesSearchAccessory: Bool) -> some View {
@@ -68,6 +84,7 @@ private struct SidebarView: View {
     @Binding var searchText: String
     @Binding var searchExpanded: Bool
     let usesSearchAccessory: Bool
+    var onSelectSimulator: ((String) -> Void)?
     @State private var presentedSheet: SidebarSheet?
     @State private var isScanningPairingQR = false
     @State private var selectedSimulatorTypeFilter: SimulatorTypeFilter?
@@ -243,34 +260,72 @@ private struct SidebarView: View {
         .modifier(SidebarNavigationBarBackgroundModifier(hidden: usesIPadSidebarLayout))
     }
 
+    @ViewBuilder
     private var simulatorList: some View {
-        List(selection: simulatorSelection) {
-            simulatorRows
-        }
-        .refreshable {
-            await model.refreshSimulators()
-        }
-        .contentMargins(
-            .top,
-            showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0,
-            for: .scrollContent
-        )
-        .background {
-            RefreshControlOffsetProbe(offset: showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0)
+        if onSelectSimulator != nil {
+            List {
+                simulatorRows
+            }
+            .refreshable {
+                await model.refreshSimulators()
+            }
+            .contentMargins(
+                .top,
+                showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0,
+                for: .scrollContent
+            )
+            .background {
+                RefreshControlOffsetProbe(offset: showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0)
+            }
+        } else {
+            List(selection: simulatorSelection) {
+                simulatorRows
+            }
+            .refreshable {
+                await model.refreshSimulators()
+            }
+            .contentMargins(
+                .top,
+                showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0,
+                for: .scrollContent
+            )
+            .background {
+                RefreshControlOffsetProbe(offset: showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0)
+            }
         }
     }
 
     @ViewBuilder
     private var simulatorRows: some View {
         ForEach(filteredSimulators) { simulator in
-            SimulatorRow(
-                simulator: simulator,
-                isBusy: model.isSimulatorLifecycleBusy(simulator)
-            )
-                .tag(simulator.udid)
+            if let onSelectSimulator {
+                Button {
+                    model.hapticSelection()
+                    onSelectSimulator(simulator.udid)
+                } label: {
+                    SimulatorRow(
+                        simulator: simulator,
+                        isBusy: model.isSimulatorLifecycleBusy(simulator)
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
                 .contextMenu {
                     SimulatorLifecycleMenuItems(model: model, simulator: simulator)
                 }
+            } else {
+                SimulatorRow(
+                    simulator: simulator,
+                    isBusy: model.isSimulatorLifecycleBusy(simulator)
+                )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .tag(simulator.udid)
+                    .contextMenu {
+                        SimulatorLifecycleMenuItems(model: model, simulator: simulator)
+                    }
+            }
         }
     }
 
