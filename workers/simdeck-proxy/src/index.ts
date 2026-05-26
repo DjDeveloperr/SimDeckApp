@@ -100,6 +100,7 @@ export class SimDeckSession extends DurableObject<Env> {
 
   async register(payload: unknown): Promise<StatusResponse> {
     const parsed = parseRunnerPayload(payload);
+    await this.refreshFromGitHubIfNeeded(true);
     if (!this.shouldAcceptRunnerRun(parsed.runId)) {
       return this.status();
     }
@@ -123,6 +124,7 @@ export class SimDeckSession extends DurableObject<Env> {
     const reconnecting = readBoolean(payload, "reconnecting");
     const runId = readString(payload, "runId");
     const runUrl = readString(payload, "runUrl");
+    await this.refreshFromGitHubIfNeeded(true);
     if (!this.shouldAcceptRunnerRun(runId)) {
       return this.status();
     }
@@ -199,11 +201,11 @@ export class SimDeckSession extends DurableObject<Env> {
     }
   }
 
-  private async refreshFromGitHubIfNeeded(): Promise<void> {
-    if (this.state.state !== "starting" || this.state.runId || !this.state.requestedAt) {
+  private async refreshFromGitHubIfNeeded(force = false): Promise<void> {
+    if (this.state.state !== "starting" || (this.state.runId && !force) || !this.state.requestedAt) {
       return;
     }
-    if (Date.now() - this.state.requestedAt < 3500) {
+    if (!force && Date.now() - this.state.requestedAt < 3500) {
       return;
     }
     const run = await this.findRecentWorkflowRun();
