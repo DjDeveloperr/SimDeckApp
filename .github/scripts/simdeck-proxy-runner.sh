@@ -106,13 +106,23 @@ start_tunnel() {
   return 1
 }
 
+ensure_tunnel_healthy() {
+  if [[ -z "${TUNNEL_URL}" ]] || ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+    return 1
+  fi
+  curl --fail --silent --show-error --max-time 8 \
+    -H "accept: application/json" \
+    -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
+    "${TUNNEL_URL}/api/health" >/dev/null
+}
+
 if ! start_tunnel; then
   post_json "/api/runner/heartbeat" "{\"message\":\"Cloudflare tunnel failed to start.\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
   exit 1
 fi
 
 while true; do
-  if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+  if ! ensure_tunnel_healthy; then
     post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
     start_tunnel || exit 1
   fi
