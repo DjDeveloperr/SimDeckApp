@@ -195,6 +195,13 @@ struct SimDeckEndpoint: Identifiable, Hashable, Codable, Sendable {
             return nil
         }
     }
+
+    var usesCloudProxy: Bool {
+        if serverKind?.normalizedSimDeckServerKind == "cloudflareproxy" {
+            return true
+        }
+        return baseURL.host(percentEncoded: false)?.lowercased().hasSuffix(".workers.dev") == true
+    }
 }
 
 struct SimulatorMetadata: Identifiable, Hashable, Decodable, Sendable {
@@ -640,6 +647,18 @@ struct StreamConfig: Codable, Hashable, Sendable {
 
     var summary: String {
         "WebRTC / \(quality.summaryLabel) / \(fps) fps"
+    }
+
+    var cloudProxyDefault: StreamConfig {
+        var config = self
+        config.encoder = .software
+        if config.fps > 30 {
+            config.fps = 30
+        }
+        if config.quality == .auto || config.quality == .full {
+            config.quality = .economy
+        }
+        return config
     }
 }
 

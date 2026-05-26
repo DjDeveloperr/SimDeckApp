@@ -660,11 +660,12 @@ final class AppModel {
                 client.disconnect()
                 return false
             }
+            let effectiveStreamConfig = endpoint.usesCloudProxy ? streamConfig.cloudProxyDefault : streamConfig
             let answer = try await client.connect(
                 api: api,
                 simulatorID: selectedSimulatorID,
                 health: loadedHealth,
-                streamConfig: streamConfig
+                streamConfig: effectiveStreamConfig
             )
             guard isCurrentStreamRequest(generation, simulatorID: selectedSimulatorID) else {
                 client.disconnect()
