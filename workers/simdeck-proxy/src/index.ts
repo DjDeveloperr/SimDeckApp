@@ -265,7 +265,7 @@ export default {
     }
 
     ctx.waitUntil(session.recordActivity());
-    return proxyToRunner(request, status);
+    return proxyToRunner(request, status, url.pathname);
   }
 };
 
@@ -382,7 +382,7 @@ function coldResponse(pathname: string, status: StatusResponse): Response {
   }, 503);
 }
 
-async function proxyToRunner(request: Request, status: StatusResponse): Promise<Response> {
+async function proxyToRunner(request: Request, status: StatusResponse, pathname: string): Promise<Response> {
   const upstream = new URL(request.url);
   upstream.protocol = "https:";
   const base = new URL(status.runnerBaseUrl ?? "");
@@ -395,12 +395,63 @@ async function proxyToRunner(request: Request, status: StatusResponse): Promise<
     headers.set("x-simdeck-token", status.runnerToken);
   }
 
-  return fetch(upstream, {
+  const response = await fetch(upstream, {
     method: request.method,
     headers,
     body: request.body,
     redirect: "manual"
   });
+  if (pathname === "/api/simulators" && response.ok) {
+    return normalizedSimulatorsResponse(response);
+  }
+  return response;
+}
+
+async function normalizedSimulatorsResponse(response: Response): Promise<Response> {
+  const payload = await response.json<{ simulators?: unknown[] }>();
+  const simulators = Array.isArray(payload.simulators)
+    ? payload.simulators.map((simulator) => normalizeSimulator(simulator))
+    : [];
+  return json({
+    ...payload,
+    simulators,
+    proxyStatus: "ready",
+    statusMessage: `Mac ready. ${simulators.length} simulator${simulators.length === 1 ? "" : "s"}.`
+  });
+}
+
+function normalizeSimulator(simulator: unknown): unknown {
+  if (!simulator || typeof simulator !== "object") {
+    return simulator;
+  }
+  const record = simulator as Record<string, unknown>;
+  if (typeof record.platform === "string" && record.platform.trim()) {
+    return record;
+  }
+  const metadata = [
+    record.runtimeIdentifier,
+    record.runtimeName,
+    record.deviceTypeIdentifier,
+    record.deviceTypeName,
+    record.name
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  let platform = "iOS";
+  if (metadata.includes("watchos") || metadata.includes("apple-watch") || metadata.includes("apple watch")) {
+    platform = "watchOS";
+  } else if (metadata.includes("tvos") || metadata.includes("apple-tv") || metadata.includes("apple tv")) {
+    platform = "tvOS";
+  } else if (metadata.includes("vision") || metadata.includes("xros")) {
+    platform = "visionOS";
+  } else if (metadata.includes("android") || metadata.includes("pixel")) {
+    platform = "Android";
+  }
+  return {
+    ...record,
+    platform
+  };
 }
 
 async function isAuthorized(
