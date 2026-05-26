@@ -42,6 +42,7 @@ jobs:
           SIMDECK_PROXY_URL: ${{ inputs.proxy_url }}
           SIMDECK_PROXY_RUNNER_TOKEN: ${{ secrets.SIMDECK_PROXY_RUNNER_TOKEN }}
           SIMDECK_RUNNER_PORT: ${{ inputs.port }}
+          SIMDECK_DEFAULT_BOOT_SIMULATOR_NAME: iPhone 17 Pro
           SIMDECK_WAKE_REASON: ${{ inputs.reason }}
           GH_RUN_ID: ${{ github.run_id }}
           GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

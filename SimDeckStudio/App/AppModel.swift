@@ -525,13 +525,21 @@ final class AppModel {
 
     func refreshSimulators(silent: Bool = false) async {
         guard let endpoint else { return }
-        lastSimulatorRefreshAt = Date()
         let previousSelectedID = selectedSimulatorID
         let wasSelectedBooted = selectedSimulator?.isBooted == true
         do {
             let simulatorsResponse = try await SimDeckAPI(endpoint: endpoint).simulatorsResponse()
             let refreshedSimulators = simulatorsResponse.simulators
             applyServerStatus(simulatorsResponse)
+            guard shouldApplySimulatorList(simulatorsResponse) else {
+                lastSimulatorRefreshAt = .distantPast
+                if !silent {
+                    status = serverStatusMessage ?? "Updating simulator list."
+                    hapticSelection()
+                }
+                return
+            }
+            lastSimulatorRefreshAt = Date()
             simulators = refreshedSimulators
             if let previousSelectedID,
                !refreshedSimulators.contains(where: { $0.udid == previousSelectedID }) {
@@ -552,6 +560,7 @@ final class AppModel {
                 hapticSelection()
             }
         } catch {
+            lastSimulatorRefreshAt = .distantPast
             if !silent {
                 status = error.localizedDescription
                 hapticWarning()
@@ -563,6 +572,13 @@ final class AppModel {
         guard endpoint != nil else { return }
         guard Date().timeIntervalSince(lastSimulatorRefreshAt) >= maxAge else { return }
         await refreshSimulators(silent: silent)
+    }
+
+    private func shouldApplySimulatorList(_ response: SimulatorsResponse) -> Bool {
+        guard let proxyStatus = response.proxyStatus?.nilIfBlank?.lowercased() else {
+            return true
+        }
+        return proxyStatus == "ready" || !response.simulators.isEmpty
     }
 
     func selectSimulator(_ udid: String?) {
