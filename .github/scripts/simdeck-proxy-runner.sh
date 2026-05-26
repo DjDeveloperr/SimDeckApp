@@ -65,33 +65,42 @@ if [[ -z "$SIMDECK_TOKEN" ]]; then
 fi
 
 boot_default_simulator() {
-  local list_json booted_udid target_udid encoded_name
+  local list_json booted_udid target_udid simulator_count encoded_name
   encoded_name="$(jq -rn --arg value "$DEFAULT_BOOT_SIMULATOR_NAME" '$value|@uri')"
   post_json "/api/runner/heartbeat" "{\"message\":\"Booting ${DEFAULT_BOOT_SIMULATOR_NAME}...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
 
-  list_json="$(local_simdeck_request GET "/api/simulators")"
-  booted_udid="$(echo "${list_json}" | jq -r --arg name "$DEFAULT_BOOT_SIMULATOR_NAME" '[.simulators[]? | select(.name == $name and ((.isBooted // false) == true)) | .udid][0] // empty')"
-  if [[ -n "$booted_udid" ]]; then
-    echo "${DEFAULT_BOOT_SIMULATOR_NAME} already booted: ${booted_udid}"
-    return 0
-  fi
+  for attempt in $(seq 1 60); do
+    list_json="$(local_simdeck_request GET "/api/simulators" || echo '{"simulators":[]}')"
+    simulator_count="$(echo "${list_json}" | jq -r '.simulators | length // 0')"
+    booted_udid="$(echo "${list_json}" | jq -r --arg name "$DEFAULT_BOOT_SIMULATOR_NAME" '[.simulators[]? | select(.name == $name and ((.isBooted // false) == true)) | .udid][0] // empty')"
+    if [[ -n "$booted_udid" ]]; then
+      echo "${DEFAULT_BOOT_SIMULATOR_NAME} already booted: ${booted_udid}"
+      return 0
+    fi
 
-  target_udid="$(echo "${list_json}" | jq -r --arg name "$DEFAULT_BOOT_SIMULATOR_NAME" '
-    [.simulators[]?
-      | select(.name == $name)
-      | select((.platform // "iOS") == "iOS")
-      | select((.isBooted // false) == false)
-      | .udid][0] // empty
-  ')"
-  if [[ -z "$target_udid" ]]; then
-    target_udid="$(echo "${list_json}" | jq -r '
+    target_udid="$(echo "${list_json}" | jq -r --arg name "$DEFAULT_BOOT_SIMULATOR_NAME" '
       [.simulators[]?
-        | select((.name // "") | test("^iPhone 17"))
+        | select(.name == $name)
         | select((.platform // "iOS") == "iOS")
         | select((.isBooted // false) == false)
         | .udid][0] // empty
     ')"
-  fi
+    if [[ -z "$target_udid" ]]; then
+      target_udid="$(echo "${list_json}" | jq -r '
+        [.simulators[]?
+          | select((.name // "") | test("^iPhone 17"))
+          | select((.platform // "iOS") == "iOS")
+          | select((.isBooted // false) == false)
+          | .udid][0] // empty
+      ')"
+    fi
+    if [[ -n "$target_udid" ]]; then
+      break
+    fi
+    echo "Waiting for simulator inventory; attempt ${attempt}, count=${simulator_count}"
+    sleep 2
+  done
+
   if [[ -z "$target_udid" ]]; then
     echo "No ${DEFAULT_BOOT_SIMULATOR_NAME} simulator found; skipping default boot" >&2
     return 0
