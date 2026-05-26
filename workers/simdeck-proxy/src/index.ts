@@ -100,6 +100,19 @@ export class SimDeckSession extends DurableObject<Env> {
 
   async register(payload: unknown): Promise<StatusResponse> {
     const parsed = parseRunnerPayload(payload);
+    if (!parsed.simdeckToken) {
+      throw new Error("simdeckToken is required");
+    }
+    if (!(await this.isTunnelUrlHealthy(parsed.baseUrl, parsed.simdeckToken))) {
+      await this.setState({
+        ...this.state,
+        state: "starting",
+        message: "Opening Cloudflare tunnel...",
+        runnerBaseUrl: undefined,
+        runnerToken: undefined
+      });
+      throw new Error("Runner tunnel is not reachable from the Worker yet");
+    }
     await this.setState({
       state: "ready",
       message: "Mac ready.",
@@ -117,10 +130,12 @@ export class SimDeckSession extends DurableObject<Env> {
 
   async heartbeat(payload: unknown): Promise<StatusResponse> {
     const message = readString(payload, "message");
+    const reconnecting = readBoolean(payload, "reconnecting");
     await this.setState({
       ...this.state,
-      state: this.state.state === "idle" ? "starting" : this.state.state,
+      state: reconnecting || this.state.state === "idle" ? "starting" : this.state.state,
       message: message ?? this.state.message,
+      runnerBaseUrl: reconnecting ? undefined : this.state.runnerBaseUrl,
       lastHeartbeatAt: Date.now()
     });
     return this.status();
@@ -258,13 +273,17 @@ export class SimDeckSession extends DurableObject<Env> {
     if (this.state.state !== "ready" || !this.state.runnerBaseUrl || !this.state.runnerToken) {
       return true;
     }
+    return this.isTunnelUrlHealthy(this.state.runnerBaseUrl, this.state.runnerToken);
+  }
+
+  private async isTunnelUrlHealthy(baseUrl: string, simdeckToken: string): Promise<boolean> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
-      const response = await fetch(`${this.state.runnerBaseUrl}/api/health`, {
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/health`, {
         headers: {
           accept: "application/json",
-          "x-simdeck-token": this.state.runnerToken
+          "x-simdeck-token": simdeckToken
         },
         signal: controller.signal
       });
@@ -602,6 +621,13 @@ function readString(payload: unknown, key: string): string | undefined {
   }
   const value = (payload as Record<string, unknown>)[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readBoolean(payload: unknown, key: string): boolean {
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+  return (payload as Record<string, unknown>)[key] === true;
 }
 
 function githubApiUrl(env: Env, path: string): string {

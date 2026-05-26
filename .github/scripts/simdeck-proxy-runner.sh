@@ -96,9 +96,10 @@ start_tunnel() {
     fi
     TUNNEL_URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "${TUNNEL_LOG}" | tail -n 1 || true)"
     if [[ -n "$TUNNEL_URL" ]]; then
-      register_tunnel
-      echo "SimDeck runner registered at ${TUNNEL_URL}"
-      return 0
+      if register_tunnel; then
+        echo "SimDeck runner registered at ${TUNNEL_URL}"
+        return 0
+      fi
     fi
     sleep 1
   done
@@ -123,7 +124,7 @@ fi
 
 while true; do
   if ! ensure_tunnel_healthy; then
-    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
     start_tunnel || exit 1
   fi
   KEEPALIVE="$(post_json "/api/runner/keepalive" "{}")"
@@ -135,7 +136,7 @@ while true; do
     break
   fi
   if [[ "$SHOULD_REOPEN_TUNNEL" == "true" ]]; then
-    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
     start_tunnel || exit 1
   fi
   sleep 15
