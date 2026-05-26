@@ -35,9 +35,21 @@ post_json "/api/runner/heartbeat" "{\"message\":\"Starting SimDeck service...\",
 PAIR_JSON="$(simdeck pair --port "${PORT}" --bind 127.0.0.1 --json)"
 echo "${PAIR_JSON}" | jq .
 
-SIMDECK_TOKEN="$(echo "${PAIR_JSON}" | jq -r '.accessToken // .token // .serviceToken // empty')"
+LOCAL_SIMDECK_URL="$(echo "${PAIR_JSON}" | jq -r '.url // "http://127.0.0.1:'"${PORT}"'"')"
+PAIRING_CODE="$(echo "${PAIR_JSON}" | jq -r '.pairingCode // empty')"
+if [[ -z "$PAIRING_CODE" ]]; then
+  echo "simdeck pair --json did not include pairingCode" >&2
+  exit 1
+fi
+PAIR_RESPONSE="$(curl --fail-with-body --silent --show-error \
+  -H "accept: application/json" \
+  -H "content-type: application/json" \
+  --data "{\"code\":\"${PAIRING_CODE}\"}" \
+  "${LOCAL_SIMDECK_URL%/}/api/pair")"
+SIMDECK_TOKEN="$(echo "${PAIR_RESPONSE}" | jq -r '.accessToken // empty')"
 if [[ -z "$SIMDECK_TOKEN" ]]; then
-  SIMDECK_TOKEN="$(echo "${PAIR_JSON}" | jq -r '.. | strings | select(length > 20) | select(test("^[A-Za-z0-9._~+/=-]+$"))' | head -n 1)"
+  echo "SimDeck pairing did not return accessToken" >&2
+  exit 1
 fi
 
 post_json "/api/runner/heartbeat" "{\"message\":\"Opening Cloudflare tunnel...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null

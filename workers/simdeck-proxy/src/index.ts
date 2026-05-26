@@ -148,6 +148,23 @@ export class SimDeckSession extends DurableObject<Env> {
     return { shouldStop, idleForSeconds, status: await this.status() };
   }
 
+  async reset(): Promise<StatusResponse> {
+    await this.setState({
+      state: "idle",
+      message: "Ready. Mac runner is cold.",
+      runnerBaseUrl: undefined,
+      runnerToken: undefined,
+      runId: undefined,
+      runUrl: undefined,
+      requestedAt: undefined,
+      registeredAt: undefined,
+      lastActivityAt: undefined,
+      lastHeartbeatAt: undefined,
+      failure: undefined
+    });
+    return this.status();
+  }
+
   async recordActivity(): Promise<void> {
     if (this.state.state === "ready" || this.state.state === "starting") {
       await this.setState({
@@ -238,6 +255,10 @@ export default {
       return handleRunnerRequest(request, session, env);
     }
 
+    if (url.pathname === "/api/proxy/reset" && request.method === "POST") {
+      return handleResetRequest(request, session, env);
+    }
+
     if (url.pathname === "/login" || url.pathname === "/login.svg" || url.pathname === "/api/login") {
       return handleLoginRequest(request, env);
     }
@@ -314,6 +335,23 @@ async function handleLoginRequest(request: Request, env: Env): Promise<Response>
       "cache-control": "no-store"
     }
   });
+}
+
+async function handleResetRequest(
+  request: Request,
+  session: DurableObjectStub<SimDeckSession>,
+  env: Env
+): Promise<Response> {
+  if (!env.CREDENTIALS_PASSWORD || !(await isPasswordAuthorized(request, env.CREDENTIALS_PASSWORD))) {
+    return new Response(JSON.stringify({ ok: false, error: "Password required" }), {
+      status: 401,
+      headers: {
+        ...JSON_HEADERS,
+        "www-authenticate": 'Basic realm="SimDeck Cloud Credentials", charset="UTF-8"'
+      }
+    });
+  }
+  return json(await session.reset());
 }
 
 async function handleRunnerRequest(
