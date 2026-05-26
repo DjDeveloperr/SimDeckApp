@@ -1,0 +1,19 @@
+{
+  "name": "simdeck-proxy-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260526.1",
+    "@types/qrcode": "^1.5.5",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.95.0"
+  }
+}

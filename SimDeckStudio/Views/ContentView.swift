@@ -334,11 +334,21 @@ private struct SidebarView: View {
             || selectedSimulatorTypeFilter != nil {
             return "No Results"
         }
+        if let serverStatusMessage = model.serverStatusMessage,
+           model.endpoint != nil,
+           model.simulators.isEmpty {
+            return serverStatusMessage
+        }
         return "No Simulators"
     }
 
     private var emptySimulatorSystemImage: String {
-        selectedSimulatorTypeFilter?.systemImage
+        if model.serverProxyStatus != nil,
+           model.endpoint != nil,
+           model.simulators.isEmpty {
+            return "clock.arrow.circlepath"
+        }
+        return selectedSimulatorTypeFilter?.systemImage
             ?? (searchText.isEmpty ? "iphone.slash" : "magnifyingglass")
     }
 

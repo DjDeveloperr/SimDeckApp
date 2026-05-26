@@ -119,6 +119,8 @@ final class AppModel {
     var pairingCode = ""
     var authEndpoint: SimDeckEndpoint?
     var status = "Ready"
+    var serverStatusMessage: String?
+    var serverProxyStatus: String?
     var isBusy = false
     var streamState: StreamState = .idle
     var videoSize: CGSize = .zero
@@ -205,7 +207,12 @@ final class AppModel {
     }
 
     var selectedEndpointSubtitle: String {
-        endpoint?.listSubtitle ?? "No SimDeck connected"
+        if let serverStatusMessage,
+           endpoint != nil,
+           simulators.isEmpty {
+            return serverStatusMessage
+        }
+        return endpoint?.listSubtitle ?? "No SimDeck connected"
     }
 
     var streamNavigationSubtitle: String {
@@ -299,12 +306,14 @@ final class AppModel {
                 resolvedCandidate.alternateBaseURLs = uniquedURLs(
                     resolvedCandidate.alternateBaseURLs + alternateURLs(from: health, fallbackPort: normalizedPort(for: resolvedCandidate.baseURL))
                 ).filter { $0 != resolvedCandidate.baseURL }
-                let simulators = try await SimDeckAPI(endpoint: resolvedCandidate).simulators()
+                let simulatorsResponse = try await SimDeckAPI(endpoint: resolvedCandidate).simulatorsResponse()
+                let simulators = simulatorsResponse.simulators
                 guard generation == connectionGeneration else { return false }
                 stopStream()
                 self.endpoint = resolvedCandidate
                 self.authEndpoint = nil
                 self.simulators = simulators
+                applyServerStatus(simulatorsResponse)
                 selectedSimulatorID = autoStart
                     ? resolvedCandidate.preferredSimulatorID
                         ?? simulators.first(where: \.isBooted)?.udid
@@ -314,7 +323,9 @@ final class AppModel {
                     saveUserEndpoint(resolvedCandidate)
                 }
                 saveSelectedEndpoint(resolvedCandidate)
-                status = simulators.isEmpty ? "Connected. No simulators found." : "Connected."
+                status = simulators.isEmpty
+                    ? serverStatusMessage ?? "Connected. No simulators found."
+                    : "Connected."
                 hapticSuccess()
                 if autoStart, selectedSimulatorID != nil {
                     await prepareSelectedSimulator()
@@ -372,6 +383,15 @@ final class AppModel {
         )
         .filter { $0 != updated.baseURL }
         return updated
+    }
+
+    private func applyServerStatus(_ response: SimulatorsResponse) {
+        serverProxyStatus = response.proxyStatus?.nilIfBlank
+        serverStatusMessage = response.statusMessage?.nilIfBlank
+        if response.proxyStatus == nil && response.statusMessage == nil {
+            serverProxyStatus = nil
+            serverStatusMessage = nil
+        }
     }
 
     private func presentPairing(for endpoint: SimDeckEndpoint) {
@@ -509,7 +529,9 @@ final class AppModel {
         let previousSelectedID = selectedSimulatorID
         let wasSelectedBooted = selectedSimulator?.isBooted == true
         do {
-            let refreshedSimulators = try await SimDeckAPI(endpoint: endpoint).simulators()
+            let simulatorsResponse = try await SimDeckAPI(endpoint: endpoint).simulatorsResponse()
+            let refreshedSimulators = simulatorsResponse.simulators
+            applyServerStatus(simulatorsResponse)
             simulators = refreshedSimulators
             if let previousSelectedID,
                !refreshedSimulators.contains(where: { $0.udid == previousSelectedID }) {
@@ -526,7 +548,7 @@ final class AppModel {
                 }
             }
             if !silent {
-                status = "Updated."
+                status = serverStatusMessage ?? "Updated."
                 hapticSelection()
             }
         } catch {

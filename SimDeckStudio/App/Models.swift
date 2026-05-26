@@ -439,6 +439,10 @@ struct ChromeButtonProfile: Hashable, Codable, Sendable {
 
 struct SimulatorsResponse: Decodable, Sendable {
     let simulators: [SimulatorMetadata]
+    let proxyStatus: String?
+    let statusMessage: String?
+    let runId: String?
+    let runUrl: String?
 }
 
 struct SimulatorDeviceTypeOption: Identifiable, Hashable, Decodable, Sendable {
@@ -529,6 +533,10 @@ struct HealthResponse: Decodable, Sendable {
     let videoCodec: String?
     let realtimeStream: Bool?
     let webRtc: WebRTCConfigurationResponse?
+    let proxyStatus: String?
+    let statusMessage: String?
+    let runId: String?
+    let runUrl: String?
 }
 
 struct WebRTCConfigurationResponse: Decodable, Sendable {

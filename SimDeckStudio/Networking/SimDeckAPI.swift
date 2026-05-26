@@ -13,8 +13,20 @@ enum SimDeckAPIError: LocalizedError {
         case .invalidResponse:
             "SimDeck returned an invalid response."
         case let .requestFailed(status, message):
-            "Request failed with status \(status): \(message)"
+            if let statusMessage = Self.statusMessage(from: message) {
+                statusMessage
+            } else {
+                "Request failed with status \(status): \(message)"
+            }
         }
+    }
+
+    private static func statusMessage(from message: String) -> String? {
+        guard let data = message.data(using: .utf8),
+              let response = try? JSONDecoder().decode(StatusErrorResponse.self, from: data) else {
+            return nil
+        }
+        return response.statusMessage?.nilIfBlank ?? response.error?.nilIfBlank
     }
 }
 
@@ -39,8 +51,11 @@ struct SimDeckAPI: Sendable {
     }
 
     func simulators() async throws -> [SimulatorMetadata] {
-        let response: SimulatorsResponse = try await decode(path: "/api/simulators")
-        return response.simulators
+        try await simulatorsResponse().simulators
+    }
+
+    func simulatorsResponse() async throws -> SimulatorsResponse {
+        try await decode(path: "/api/simulators")
     }
 
     func simulatorCreateOptions() async throws -> SimulatorCreateOptionsResponse {
@@ -245,6 +260,11 @@ struct SimDeckAPI: Sendable {
 }
 
 private struct EmptyResponse: Codable {}
+
+private struct StatusErrorResponse: Decodable {
+    let error: String?
+    let statusMessage: String?
+}
 
 private struct PairResponse: Decodable {
     let ok: Bool

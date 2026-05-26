@@ -1,0 +1,48 @@
+name: SimDeck on-demand Mac
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxy_url:
+        description: Cloudflare Worker base URL
+        required: true
+        type: string
+      reason:
+        description: Request that woke the runner
+        required: false
+        type: string
+      port:
+        description: Local SimDeck service port
+        required: false
+        default: "4310"
+        type: string
+
+concurrency:
+  group: simdeck-on-demand-mac
+  cancel-in-progress: true
+
+jobs:
+  serve:
+    name: Serve SimDeck
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Run SimDeck bridge
+        env:
+          SIMDECK_PROXY_URL: ${{ inputs.proxy_url }}
+          SIMDECK_PROXY_RUNNER_TOKEN: ${{ secrets.SIMDECK_PROXY_RUNNER_TOKEN }}
+          SIMDECK_RUNNER_PORT: ${{ inputs.port }}
+          SIMDECK_WAKE_REASON: ${{ inputs.reason }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: .github/scripts/simdeck-proxy-runner.sh
