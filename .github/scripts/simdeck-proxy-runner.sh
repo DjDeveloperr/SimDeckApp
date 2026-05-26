@@ -33,7 +33,7 @@ npm i -g simdeck@latest
 post_json "/api/runner/heartbeat" "{\"message\":\"Starting SimDeck service...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null
 
 PAIR_JSON="$(simdeck pair --port "${PORT}" --bind 127.0.0.1 --json)"
-echo "${PAIR_JSON}" | jq .
+echo "${PAIR_JSON}" | jq '{ok, url, serverId, target, started, addresses}'
 
 LOCAL_SIMDECK_URL="$(echo "${PAIR_JSON}" | jq -r '.url // "http://127.0.0.1:'"${PORT}"'"')"
 PAIRING_CODE="$(echo "${PAIR_JSON}" | jq -r '.pairingCode // empty')"
@@ -58,42 +58,64 @@ if ! command -v cloudflared >/dev/null 2>&1; then
   brew install cloudflared
 fi
 
-TUNNEL_LOG="$(mktemp)"
-cloudflared tunnel --url "http://127.0.0.1:${PORT}" --no-autoupdate >"${TUNNEL_LOG}" 2>&1 &
-TUNNEL_PID="$!"
+TUNNEL_LOG=""
+TUNNEL_PID=""
+TUNNEL_URL=""
 
 cleanup() {
-  kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
+  if [[ -n "${TUNNEL_PID}" ]]; then
+    kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
+  fi
   simdeck kill >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-TUNNEL_URL=""
-for _ in $(seq 1 60); do
-  TUNNEL_URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "${TUNNEL_LOG}" | tail -n 1 || true)"
-  if [[ -n "$TUNNEL_URL" ]]; then
-    break
-  fi
-  sleep 1
-done
+register_tunnel() {
+  local register_body
+  register_body="$(jq -nc \
+    --arg baseUrl "$TUNNEL_URL" \
+    --arg simdeckToken "$SIMDECK_TOKEN" \
+    --arg runId "${GH_RUN_ID:-}" \
+    --arg runUrl "${GH_RUN_URL:-}" \
+    '{baseUrl:$baseUrl, simdeckToken:$simdeckToken, runId:$runId, runUrl:$runUrl}')"
+  post_json "/api/runner/register" "${register_body}" >/dev/null
+}
 
-if [[ -z "$TUNNEL_URL" ]]; then
+start_tunnel() {
+  if [[ -n "${TUNNEL_PID}" ]]; then
+    kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
+  fi
+  TUNNEL_LOG="$(mktemp)"
+  cloudflared tunnel --url "http://127.0.0.1:${PORT}" --protocol http2 --no-autoupdate >"${TUNNEL_LOG}" 2>&1 &
+  TUNNEL_PID="$!"
+  TUNNEL_URL=""
+  for _ in $(seq 1 60); do
+    if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+      cat "${TUNNEL_LOG}" >&2
+      return 1
+    fi
+    TUNNEL_URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "${TUNNEL_LOG}" | tail -n 1 || true)"
+    if [[ -n "$TUNNEL_URL" ]]; then
+      register_tunnel
+      echo "SimDeck runner registered at ${TUNNEL_URL}"
+      return 0
+    fi
+    sleep 1
+  done
   cat "${TUNNEL_LOG}" >&2
+  return 1
+}
+
+if ! start_tunnel; then
   post_json "/api/runner/heartbeat" "{\"message\":\"Cloudflare tunnel failed to start.\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
   exit 1
 fi
 
-REGISTER_BODY="$(jq -nc \
-  --arg baseUrl "$TUNNEL_URL" \
-  --arg simdeckToken "$SIMDECK_TOKEN" \
-  --arg runId "${GH_RUN_ID:-}" \
-  --arg runUrl "${GH_RUN_URL:-}" \
-  '{baseUrl:$baseUrl, simdeckToken:$simdeckToken, runId:$runId, runUrl:$runUrl}')"
-post_json "/api/runner/register" "${REGISTER_BODY}" >/dev/null
-
-echo "SimDeck runner registered at ${TUNNEL_URL}"
-
 while true; do
+  if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    start_tunnel || exit 1
+  fi
   KEEPALIVE="$(post_json "/api/runner/keepalive" "{}")"
   SHOULD_STOP="$(echo "${KEEPALIVE}" | jq -r '.shouldStop')"
   IDLE_FOR="$(echo "${KEEPALIVE}" | jq -r '.idleForSeconds')"
