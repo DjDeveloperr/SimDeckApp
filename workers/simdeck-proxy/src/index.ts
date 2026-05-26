@@ -476,6 +476,24 @@ async function proxyToRunner(request: Request, status: StatusResponse, pathname:
     body: request.body,
     redirect: "manual"
   });
+  if (response.status === 502 || response.status === 530) {
+    const reconnectingStatus: StatusResponse = {
+      ...status,
+      state: "starting",
+      message: "Tunnel disconnected. Reopening..."
+    };
+    if (pathname === "/api/simulators" || pathname === "/api/simulators/create-options") {
+      return coldResponse(pathname, reconnectingStatus);
+    }
+    return json({
+      ok: false,
+      error: "Runner tunnel is reconnecting.",
+      proxyStatus: reconnectingStatus.state,
+      statusMessage: reconnectingStatus.message,
+      runId: reconnectingStatus.runId,
+      runUrl: reconnectingStatus.runUrl
+    }, 503);
+  }
   if (pathname === "/api/simulators" && response.ok) {
     return normalizedSimulatorsResponse(response);
   }
