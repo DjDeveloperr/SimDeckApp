@@ -30,8 +30,9 @@ post_json() {
 local_simdeck_request() {
   local method="$1"
   local path="$2"
+  local max_time="${3:-300}"
   curl --fail-with-body --silent --show-error \
-    --max-time 300 \
+    --max-time "${max_time}" \
     -X "${method}" \
     -H "accept: application/json" \
     -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
@@ -106,8 +107,10 @@ boot_default_simulator() {
     return 0
   fi
 
-  echo "Booting ${DEFAULT_BOOT_SIMULATOR_NAME}: ${target_udid} (${encoded_name})"
-  local_simdeck_request POST "/api/simulators/${target_udid}/boot" >/dev/null
+  echo "Starting boot for ${DEFAULT_BOOT_SIMULATOR_NAME}: ${target_udid} (${encoded_name})"
+  if ! xcrun simctl boot "${target_udid}" >/dev/null 2>&1; then
+    local_simdeck_request POST "/api/simulators/${target_udid}/boot" 30 >/dev/null || true
+  fi
 }
 
 if ! boot_default_simulator; then
