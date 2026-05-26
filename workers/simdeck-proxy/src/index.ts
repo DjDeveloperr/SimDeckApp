@@ -36,10 +36,21 @@ interface StatusResponse extends SessionState {
 }
 
 const SESSION_NAME = "default";
+const HEARTBEAT_STALE_MILLISECONDS = 75_000;
+const STARTING_STALE_MILLISECONDS = 10 * 60_000;
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store"
 };
+
+interface GitHubWorkflowRun {
+  id: number;
+  html_url: string;
+  status?: string;
+  conclusion?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
 
 export class SimDeckSession extends DurableObject<Env> {
   private state: SessionState = {
@@ -55,6 +66,7 @@ export class SimDeckSession extends DurableObject<Env> {
   }
 
   async status(): Promise<StatusResponse> {
+    await this.reconcileStaleState();
     await this.refreshFromGitHubIfNeeded();
     return {
       ...this.state,
@@ -63,6 +75,7 @@ export class SimDeckSession extends DurableObject<Env> {
   }
 
   async ensureRunner(reason: string, proxyUrl: string): Promise<StatusResponse> {
+    await this.reconcileStaleState();
     await this.refreshFromGitHubIfNeeded();
     if (this.state.state === "ready" && this.state.runnerBaseUrl) {
       await this.recordActivity();
@@ -95,6 +108,21 @@ export class SimDeckSession extends DurableObject<Env> {
         failure: error instanceof Error ? error.message : String(error)
       });
     }
+    return this.status();
+  }
+
+  async tunnelDisconnected(): Promise<StatusResponse> {
+    await this.reconcileStaleState(true);
+    if (this.state.state === "idle" || this.state.state === "failed") {
+      return this.status();
+    }
+    await this.setState({
+      ...this.state,
+      state: "starting",
+      message: "Tunnel disconnected. Reopening...",
+      runnerBaseUrl: undefined,
+      runnerToken: undefined
+    });
     return this.status();
   }
 
@@ -219,6 +247,69 @@ export class SimDeckSession extends DurableObject<Env> {
     });
   }
 
+  private async reconcileStaleState(force = false): Promise<void> {
+    if (this.state.state === "idle" || this.state.state === "failed") {
+      return;
+    }
+    const now = Date.now();
+    const heartbeatIsStale = this.state.lastHeartbeatAt !== undefined
+      && now - this.state.lastHeartbeatAt > HEARTBEAT_STALE_MILLISECONDS;
+    const startingIsStale = this.state.state === "starting"
+      && this.state.requestedAt !== undefined
+      && now - this.state.requestedAt > STARTING_STALE_MILLISECONDS;
+    const shouldCheckRun = force || heartbeatIsStale || startingIsStale;
+
+    if (this.state.runId && shouldCheckRun) {
+      const run = await this.findWorkflowRunById(this.state.runId);
+      if (run?.status === "completed") {
+        await this.setState({
+          state: "idle",
+          message: "Ready. Mac runner is cold.",
+          runnerBaseUrl: undefined,
+          runnerToken: undefined,
+          runId: undefined,
+          runUrl: undefined,
+          requestedAt: undefined,
+          registeredAt: undefined,
+          lastHeartbeatAt: undefined,
+          failure: run.conclusion && run.conclusion !== "success"
+            ? `Previous GitHub Actions runner completed with ${run.conclusion}.`
+            : undefined
+        });
+        return;
+      }
+    }
+
+    if (this.state.state === "ready" && heartbeatIsStale && this.state.runnerBaseUrl && this.state.runnerToken) {
+      const tunnelHealthy = await this.isTunnelUrlHealthy(this.state.runnerBaseUrl, this.state.runnerToken);
+      if (!tunnelHealthy) {
+        await this.setState({
+          ...this.state,
+          state: "starting",
+          message: "Tunnel disconnected. Reopening...",
+          runnerBaseUrl: undefined,
+          runnerToken: undefined
+        });
+      }
+      return;
+    }
+
+    if (this.state.state === "starting" && startingIsStale) {
+      await this.setState({
+        state: "failed",
+        message: "Mac runner did not become ready in time.",
+        runnerBaseUrl: undefined,
+        runnerToken: undefined,
+        runId: this.state.runId,
+        runUrl: this.state.runUrl,
+        requestedAt: this.state.requestedAt,
+        lastActivityAt: this.state.lastActivityAt,
+        lastHeartbeatAt: this.state.lastHeartbeatAt,
+        failure: "Timed out waiting for the GitHub Actions runner to register."
+      });
+    }
+  }
+
   private async dispatchWorkflow(reason: string, proxyUrl: string): Promise<void> {
     const url = githubApiUrl(this.env, `/actions/workflows/${encodeURIComponent(this.env.GITHUB_WORKFLOW)}/dispatches`);
     const body = {
@@ -239,7 +330,7 @@ export class SimDeckSession extends DurableObject<Env> {
     }
   }
 
-  private async findRecentWorkflowRun(): Promise<{ id: number; html_url: string } | undefined> {
+  private async findRecentWorkflowRun(): Promise<GitHubWorkflowRun | undefined> {
     const url = githubApiUrl(
       this.env,
       `/actions/workflows/${encodeURIComponent(this.env.GITHUB_WORKFLOW)}/runs?branch=${encodeURIComponent(this.env.GITHUB_REF)}&event=workflow_dispatch&per_page=5`
@@ -248,8 +339,17 @@ export class SimDeckSession extends DurableObject<Env> {
     if (!response.ok) {
       return undefined;
     }
-    const payload = await response.json<{ workflow_runs?: Array<{ id: number; html_url: string; created_at: string }> }>();
+    const payload = await response.json<{ workflow_runs?: GitHubWorkflowRun[] }>();
     return payload.workflow_runs?.[0];
+  }
+
+  private async findWorkflowRunById(runId: string): Promise<GitHubWorkflowRun | undefined> {
+    const url = githubApiUrl(this.env, `/actions/runs/${encodeURIComponent(runId)}`);
+    const response = await fetch(url, { headers: this.githubHeaders() });
+    if (!response.ok) {
+      return undefined;
+    }
+    return response.json<GitHubWorkflowRun>();
   }
 
   private async setState(next: SessionState): Promise<void> {
@@ -351,7 +451,7 @@ export default {
     }
 
     ctx.waitUntil(session.recordActivity());
-    return proxyToRunner(request, status, url.pathname);
+    return proxyToRunner(request, status, session, url.pathname, url.origin);
   }
 };
 
@@ -485,7 +585,13 @@ function coldResponse(pathname: string, status: StatusResponse): Response {
   }, 503);
 }
 
-async function proxyToRunner(request: Request, status: StatusResponse, pathname: string): Promise<Response> {
+async function proxyToRunner(
+  request: Request,
+  status: StatusResponse,
+  session: DurableObjectStub<SimDeckSession>,
+  pathname: string,
+  proxyUrl: string
+): Promise<Response> {
   const upstream = new URL(request.url);
   upstream.protocol = "https:";
   const base = new URL(status.runnerBaseUrl ?? "");
@@ -505,11 +611,8 @@ async function proxyToRunner(request: Request, status: StatusResponse, pathname:
     redirect: "manual"
   });
   if (response.status === 502 || response.status === 530) {
-    const reconnectingStatus: StatusResponse = {
-      ...status,
-      state: "starting",
-      message: "Tunnel disconnected. Reopening..."
-    };
+    await session.tunnelDisconnected();
+    const reconnectingStatus = await session.ensureRunner(`${request.method} ${pathname}`, proxyUrl);
     if (pathname === "/api/simulators" || pathname === "/api/simulators/create-options") {
       return coldResponse(pathname, reconnectingStatus);
     }
