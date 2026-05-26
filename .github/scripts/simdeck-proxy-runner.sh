@@ -192,7 +192,7 @@ while true; do
     post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
     start_tunnel || exit 1
   fi
-  KEEPALIVE="$(post_json "/api/runner/keepalive" "{}")"
+  KEEPALIVE="$(post_json "/api/runner/keepalive" "{\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}")"
   SHOULD_STOP="$(echo "${KEEPALIVE}" | jq -r '.shouldStop')"
   SHOULD_REOPEN_TUNNEL="$(echo "${KEEPALIVE}" | jq -r '.shouldReopenTunnel')"
   IDLE_FOR="$(echo "${KEEPALIVE}" | jq -r '.idleForSeconds')"

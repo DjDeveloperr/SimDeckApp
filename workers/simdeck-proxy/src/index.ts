@@ -100,6 +100,9 @@ export class SimDeckSession extends DurableObject<Env> {
 
   async register(payload: unknown): Promise<StatusResponse> {
     const parsed = parseRunnerPayload(payload);
+    if (!this.shouldAcceptRunnerRun(parsed.runId)) {
+      return this.status();
+    }
     await this.setState({
       state: "ready",
       message: "Mac ready.",
@@ -118,18 +121,29 @@ export class SimDeckSession extends DurableObject<Env> {
   async heartbeat(payload: unknown): Promise<StatusResponse> {
     const message = readString(payload, "message");
     const reconnecting = readBoolean(payload, "reconnecting");
+    const runId = readString(payload, "runId");
+    const runUrl = readString(payload, "runUrl");
+    if (!this.shouldAcceptRunnerRun(runId)) {
+      return this.status();
+    }
     await this.setState({
       ...this.state,
       state: reconnecting || this.state.state === "idle" ? "starting" : this.state.state,
       message: message ?? this.state.message,
       runnerBaseUrl: reconnecting ? undefined : this.state.runnerBaseUrl,
+      runId: runId ?? this.state.runId,
+      runUrl: runUrl ?? this.state.runUrl,
       lastHeartbeatAt: Date.now()
     });
     return this.status();
   }
 
-  async keepalive(): Promise<{ shouldStop: boolean; shouldReopenTunnel: boolean; idleForSeconds: number; status: StatusResponse }> {
+  async keepalive(payload: unknown): Promise<{ shouldStop: boolean; shouldReopenTunnel: boolean; idleForSeconds: number; status: StatusResponse }> {
     await this.refreshFromGitHubIfNeeded();
+    const runId = readString(payload, "runId");
+    if (!this.shouldAcceptRunnerRun(runId)) {
+      return { shouldStop: true, shouldReopenTunnel: false, idleForSeconds: 0, status: await this.status() };
+    }
     const tunnelHealthy = await this.isRunnerTunnelHealthy();
     if (!tunnelHealthy && this.state.state === "ready") {
       await this.setState({
@@ -254,6 +268,18 @@ export class SimDeckSession extends DurableObject<Env> {
   private idleTimeoutSeconds(): number {
     const parsed = Number(this.env.RUNNER_IDLE_TIMEOUT_SECONDS);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 300;
+  }
+
+  private shouldAcceptRunnerRun(runId: string | undefined): boolean {
+    if (!runId || !this.state.runId) {
+      return true;
+    }
+    const incoming = Number(runId);
+    const current = Number(this.state.runId);
+    if (Number.isFinite(incoming) && Number.isFinite(current)) {
+      return incoming >= current;
+    }
+    return runId === this.state.runId;
   }
 
   private async isRunnerTunnelHealthy(): Promise<boolean> {
@@ -407,7 +433,7 @@ async function handleRunnerRequest(
     return json(await session.heartbeat(await request.json()));
   }
   if (url.pathname === "/api/runner/keepalive" && request.method === "POST") {
-    return json(await session.keepalive());
+    return json(await session.keepalive(await request.json()));
   }
   return json({ ok: false, error: "Not found" }, 404);
 }
