@@ -100,19 +100,6 @@ export class SimDeckSession extends DurableObject<Env> {
 
   async register(payload: unknown): Promise<StatusResponse> {
     const parsed = parseRunnerPayload(payload);
-    if (!parsed.simdeckToken) {
-      throw new Error("simdeckToken is required");
-    }
-    if (!(await this.isTunnelUrlHealthy(parsed.baseUrl, parsed.simdeckToken))) {
-      await this.setState({
-        ...this.state,
-        state: "starting",
-        message: "Opening Cloudflare tunnel...",
-        runnerBaseUrl: undefined,
-        runnerToken: undefined
-      });
-      throw new Error("Runner tunnel is not reachable from the Worker yet");
-    }
     await this.setState({
       state: "ready",
       message: "Mac ready.",

@@ -78,12 +78,12 @@ struct SimDeckAPI: Sendable {
         return pairResponse?.accessToken?.nilIfBlank ?? accessToken(from: response)
     }
 
-    func bootSimulator(udid: String) async throws {
+    func bootSimulator(udid: String, timeout: TimeInterval = 300) async throws {
         let _: EmptyResponse = try await decode(
             path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/boot",
             method: "POST",
             body: Optional<String>.none,
-            timeout: 300
+            timeout: timeout
         )
     }
 

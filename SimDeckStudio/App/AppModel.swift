@@ -731,8 +731,9 @@ final class AppModel {
         hapticSelection()
         do {
             let api = SimDeckAPI(endpoint: endpoint)
-            try await api.bootSimulator(udid: simulator.udid)
-            simulators = try await api.simulators()
+            let bootError = await requestSimulatorBoot(api: api, udid: simulator.udid)
+            let refreshedSimulators = try await waitForBootedSimulator(api: api, udid: simulator.udid, bootError: bootError)
+            simulators = refreshedSimulators
             lastSimulatorRefreshAt = Date()
             status = "Started."
             simulatorLifecycleID = nil
@@ -748,6 +749,42 @@ final class AppModel {
             bootingSimulatorID = nil
             hapticWarning()
         }
+    }
+
+    private func requestSimulatorBoot(api: SimDeckAPI, udid: String) async -> Error? {
+        do {
+            try await api.bootSimulator(udid: udid, timeout: 45)
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    private func waitForBootedSimulator(
+        api: SimDeckAPI,
+        udid: String,
+        bootError: Error?,
+        timeoutSeconds: TimeInterval = 300
+    ) async throws -> [SimulatorMetadata] {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var lastError = bootError
+        while Date() < deadline {
+            do {
+                let refreshedSimulators = try await api.simulators()
+                if refreshedSimulators.contains(where: { $0.udid == udid && $0.isBooted }) {
+                    return refreshedSimulators
+                }
+                lastError = nil
+            } catch {
+                lastError = error
+            }
+            status = "Starting simulator..."
+            try await Task.sleep(for: .seconds(3))
+        }
+        if let lastError {
+            throw lastError
+        }
+        throw SimDeckAPIError.requestFailed(408, "Timed out waiting for simulator to boot.")
     }
 
     func stopSimulator(_ simulator: SimulatorMetadata) async {
