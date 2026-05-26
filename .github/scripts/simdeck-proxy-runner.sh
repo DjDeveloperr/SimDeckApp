@@ -128,10 +128,15 @@ while true; do
   fi
   KEEPALIVE="$(post_json "/api/runner/keepalive" "{}")"
   SHOULD_STOP="$(echo "${KEEPALIVE}" | jq -r '.shouldStop')"
+  SHOULD_REOPEN_TUNNEL="$(echo "${KEEPALIVE}" | jq -r '.shouldReopenTunnel')"
   IDLE_FOR="$(echo "${KEEPALIVE}" | jq -r '.idleForSeconds')"
-  echo "SimDeck keepalive: idle ${IDLE_FOR}s, shouldStop=${SHOULD_STOP}"
+  echo "SimDeck keepalive: idle ${IDLE_FOR}s, shouldStop=${SHOULD_STOP}, shouldReopenTunnel=${SHOULD_REOPEN_TUNNEL}"
   if [[ "$SHOULD_STOP" == "true" ]]; then
     break
+  fi
+  if [[ "$SHOULD_REOPEN_TUNNEL" == "true" ]]; then
+    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    start_tunnel || exit 1
   fi
   sleep 15
 done

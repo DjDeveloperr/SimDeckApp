@@ -126,8 +126,17 @@ export class SimDeckSession extends DurableObject<Env> {
     return this.status();
   }
 
-  async keepalive(): Promise<{ shouldStop: boolean; idleForSeconds: number; status: StatusResponse }> {
+  async keepalive(): Promise<{ shouldStop: boolean; shouldReopenTunnel: boolean; idleForSeconds: number; status: StatusResponse }> {
     await this.refreshFromGitHubIfNeeded();
+    const tunnelHealthy = await this.isRunnerTunnelHealthy();
+    if (!tunnelHealthy && this.state.state === "ready") {
+      await this.setState({
+        ...this.state,
+        state: "starting",
+        message: "Tunnel disconnected. Reopening...",
+        runnerBaseUrl: undefined
+      });
+    }
     const lastActivityAt = this.state.lastActivityAt ?? this.state.requestedAt ?? Date.now();
     const idleForSeconds = Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000));
     const shouldStop = this.state.state === "ready" && idleForSeconds >= this.idleTimeoutSeconds();
@@ -145,7 +154,7 @@ export class SimDeckSession extends DurableObject<Env> {
         failure: undefined
       });
     }
-    return { shouldStop, idleForSeconds, status: await this.status() };
+    return { shouldStop, shouldReopenTunnel: !tunnelHealthy, idleForSeconds, status: await this.status() };
   }
 
   async reset(): Promise<StatusResponse> {
@@ -243,6 +252,28 @@ export class SimDeckSession extends DurableObject<Env> {
   private idleTimeoutSeconds(): number {
     const parsed = Number(this.env.RUNNER_IDLE_TIMEOUT_SECONDS);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 300;
+  }
+
+  private async isRunnerTunnelHealthy(): Promise<boolean> {
+    if (this.state.state !== "ready" || !this.state.runnerBaseUrl || !this.state.runnerToken) {
+      return true;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(`${this.state.runnerBaseUrl}/api/health`, {
+        headers: {
+          accept: "application/json",
+          "x-simdeck-token": this.state.runnerToken
+        },
+        signal: controller.signal
+      });
+      return response.ok;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 
