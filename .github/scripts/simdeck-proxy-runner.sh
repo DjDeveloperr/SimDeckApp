@@ -20,6 +20,7 @@ post_json() {
   local path="$1"
   local body="$2"
   curl --fail-with-body --silent --show-error \
+    --max-time 20 \
     -X POST \
     -H "content-type: application/json" \
     -H "x-simdeck-token: ${RUNNER_TOKEN}" \
