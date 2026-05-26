@@ -162,10 +162,16 @@ start_tunnel() {
     fi
     TUNNEL_URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "${TUNNEL_LOG}" | tail -n 1 || true)"
     if [[ -n "$TUNNEL_URL" ]]; then
-      if register_tunnel; then
-        echo "SimDeck runner registered at ${TUNNEL_URL}"
-        return 0
-      fi
+      for register_attempt in $(seq 1 3); do
+        if register_tunnel; then
+          echo "SimDeck runner registered at ${TUNNEL_URL}"
+          return 0
+        fi
+        echo "Tunnel registration failed; attempt ${register_attempt}" >&2
+        sleep 2
+      done
+      cat "${TUNNEL_LOG}" >&2
+      return 1
     fi
     sleep 1
   done
