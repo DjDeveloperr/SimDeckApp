@@ -28,6 +28,19 @@ post_json() {
     "${PROXY_URL}${path}"
 }
 
+runner_heartbeat() {
+  local message="$1"
+  local reconnecting="${2:-false}"
+  local body
+  body="$(jq -nc \
+    --arg message "${message}" \
+    --arg runId "${GH_RUN_ID:-}" \
+    --arg runUrl "${GH_RUN_URL:-}" \
+    --argjson reconnecting "${reconnecting}" \
+    '{message:$message, runId:$runId, runUrl:$runUrl} + (if $reconnecting then {reconnecting:true} else {} end)')"
+  post_json "/api/runner/heartbeat" "${body}" >/dev/null || true
+}
+
 local_simdeck_request() {
   local method="$1"
   local path="$2"
@@ -40,11 +53,11 @@ local_simdeck_request() {
     "${LOCAL_SIMDECK_URL%/}${path}"
 }
 
-post_json "/api/runner/heartbeat" "{\"message\":\"Installing SimDeck on macOS runner...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null
+runner_heartbeat "Installing SimDeck CLI on macOS runner..."
 
 npm i -g simdeck@latest
 
-post_json "/api/runner/heartbeat" "{\"message\":\"Starting SimDeck service...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null
+runner_heartbeat "Starting SimDeck service..."
 
 PAIR_JSON="$(simdeck pair --port "${PORT}" --bind 127.0.0.1 --json)"
 echo "${PAIR_JSON}" | jq '{ok, url, serverId, target, started, addresses}'
@@ -69,7 +82,7 @@ fi
 boot_default_simulator() {
   local list_json booted_udid target_udid simulator_count encoded_name
   encoded_name="$(jq -rn --arg value "$DEFAULT_BOOT_SIMULATOR_NAME" '$value|@uri')"
-  post_json "/api/runner/heartbeat" "{\"message\":\"Booting ${DEFAULT_BOOT_SIMULATOR_NAME}...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+  runner_heartbeat "Finding ${DEFAULT_BOOT_SIMULATOR_NAME}..."
 
   for attempt in $(seq 1 60); do
     list_json="$(local_simdeck_request GET "/api/simulators" || echo '{"simulators":[]}')"
@@ -89,16 +102,17 @@ boot_default_simulator() {
     ')"
     if [[ -z "$target_udid" ]]; then
       target_udid="$(echo "${list_json}" | jq -r '
-        [.simulators[]?
-          | select((.name // "") | test("^iPhone 17"))
-          | select((.platform // "iOS") == "iOS")
-          | select((.isBooted // false) == false)
-          | .udid][0] // empty
+      [.simulators[]?
+        | select((.name // "") | test("^iPhone 17"))
+        | select((.platform // "iOS") == "iOS")
+        | select((.isBooted // false) == false)
+        | .udid][0] // empty
       ')"
     fi
     if [[ -n "$target_udid" ]]; then
       break
     fi
+    runner_heartbeat "Waiting for simulator inventory... (${simulator_count} found)"
     echo "Waiting for simulator inventory; attempt ${attempt}, count=${simulator_count}"
     sleep 2
   done
@@ -109,19 +123,25 @@ boot_default_simulator() {
   fi
 
   echo "Starting boot for ${DEFAULT_BOOT_SIMULATOR_NAME}: ${target_udid} (${encoded_name})"
+  runner_heartbeat "Booting ${DEFAULT_BOOT_SIMULATOR_NAME}..."
   if ! xcrun simctl boot "${target_udid}" >/dev/null 2>&1; then
+    runner_heartbeat "Boot request sent through SimDeck service..."
     local_simdeck_request POST "/api/simulators/${target_udid}/boot" 30 >/dev/null || true
   fi
 }
 
 if ! boot_default_simulator; then
-  post_json "/api/runner/heartbeat" "{\"message\":\"Default simulator boot failed. Opening Cloudflare tunnel...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+  runner_heartbeat "Default simulator boot failed. Continuing to tunnel..."
 fi
 
-post_json "/api/runner/heartbeat" "{\"message\":\"Opening Cloudflare tunnel...\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null
+runner_heartbeat "Checking Cloudflare tunnel binary..."
 
 if ! command -v cloudflared >/dev/null 2>&1; then
+  runner_heartbeat "Installing Cloudflare tunnel binary..."
   brew install cloudflared
+  runner_heartbeat "Cloudflare tunnel binary installed."
+else
+  runner_heartbeat "Cloudflare tunnel binary ready."
 fi
 
 TUNNEL_LOG=""
@@ -147,34 +167,63 @@ register_tunnel() {
   post_json "/api/runner/register" "${register_body}" >/dev/null
 }
 
+wait_for_tunnel_reachable() {
+  for attempt in $(seq 1 6); do
+    runner_heartbeat "Checking Cloudflare tunnel reachability... (attempt ${attempt})"
+    if curl --fail --silent --show-error --max-time 8 \
+      -H "accept: application/json" \
+      -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
+      "${TUNNEL_URL}/api/health" >/dev/null; then
+      return 0
+    fi
+    runner_heartbeat "Cloudflare tunnel URL is not reachable yet."
+    sleep 2
+  done
+  return 1
+}
+
 start_tunnel() {
   if [[ -n "${TUNNEL_PID}" ]]; then
     kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
   fi
+  runner_heartbeat "Starting Cloudflare tunnel process..."
   TUNNEL_LOG="$(mktemp)"
   cloudflared tunnel --url "http://127.0.0.1:${PORT}" --protocol http2 --no-autoupdate >"${TUNNEL_LOG}" 2>&1 &
   TUNNEL_PID="$!"
   TUNNEL_URL=""
-  for _ in $(seq 1 60); do
+  for attempt in $(seq 1 60); do
     if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+      runner_heartbeat "Cloudflare tunnel process exited. Retrying..." true
       cat "${TUNNEL_LOG}" >&2
       return 1
     fi
     TUNNEL_URL="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' "${TUNNEL_LOG}" | tail -n 1 || true)"
     if [[ -n "$TUNNEL_URL" ]]; then
+      runner_heartbeat "Cloudflare tunnel URL allocated. Verifying reachability..."
+      if ! wait_for_tunnel_reachable; then
+        runner_heartbeat "Allocated tunnel URL was not reachable. Requesting a new URL..." true
+        return 1
+      fi
+      runner_heartbeat "Cloudflare tunnel reachable. Registering..."
       for register_attempt in $(seq 1 3); do
+        runner_heartbeat "Registering Cloudflare tunnel... (attempt ${register_attempt})"
         if register_tunnel; then
           echo "SimDeck runner registered at ${TUNNEL_URL}"
           return 0
         fi
+        runner_heartbeat "Cloudflare tunnel registration failed. Retrying..." true
         echo "Tunnel registration failed; attempt ${register_attempt}" >&2
         sleep 2
       done
       cat "${TUNNEL_LOG}" >&2
       return 1
     fi
+    if [[ "$attempt" == "1" || $((attempt % 10)) == "0" ]]; then
+      runner_heartbeat "Waiting for Cloudflare tunnel URL... (${attempt}s)"
+    fi
     sleep 1
   done
+  runner_heartbeat "Timed out waiting for Cloudflare tunnel URL. Retrying..." true
   cat "${TUNNEL_LOG}" >&2
   return 1
 }
@@ -203,7 +252,7 @@ start_tunnel_until_registered() {
     if start_tunnel; then
       return 0
     fi
-    post_json "/api/runner/heartbeat" "{\"message\":\"${reason} Retrying tunnel...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    runner_heartbeat "${reason} Retrying tunnel in a moment..." true
     if keepalive="$(post_json "/api/runner/keepalive" "{\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" 2>/dev/null)"; then
       should_stop="$(echo "${keepalive}" | jq -r '.shouldStop // false')"
       if [[ "${should_stop}" == "true" ]]; then
@@ -221,13 +270,13 @@ fi
 
 while true; do
   if ! ensure_tunnel_healthy; then
-    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    runner_heartbeat "Tunnel health check failed. Reopening..." true
     start_tunnel_until_registered "Tunnel disconnected." || break
   fi
   if ! KEEPALIVE="$(post_json "/api/runner/keepalive" "{\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}")"; then
     echo "SimDeck keepalive failed; retrying after tunnel health check" >&2
     if ! ensure_tunnel_healthy; then
-      post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+      runner_heartbeat "Worker keepalive failed and tunnel is unhealthy. Reopening..." true
       start_tunnel_until_registered "Tunnel disconnected." || break
     fi
     sleep 15
@@ -241,7 +290,7 @@ while true; do
     break
   fi
   if [[ "$SHOULD_REOPEN_TUNNEL" == "true" ]]; then
-    post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    runner_heartbeat "Worker requested a fresh tunnel. Reopening..." true
     start_tunnel_until_registered "Tunnel disconnected." || break
   fi
   sleep 15
