@@ -5,6 +5,11 @@ PROXY_URL="${SIMDECK_PROXY_URL%/}"
 PORT="${SIMDECK_RUNNER_PORT:-4310}"
 RUNNER_TOKEN="${SIMDECK_PROXY_RUNNER_TOKEN:-}"
 DEFAULT_BOOT_SIMULATOR_NAME="${SIMDECK_DEFAULT_BOOT_SIMULATOR_NAME:-iPhone 17 Pro}"
+TOOLS_DIR="${RUNNER_TEMP:-/tmp}/simdeck-proxy-tools"
+CLOUDFLARED_DIR="${TOOLS_DIR}/cloudflared"
+
+mkdir -p "${CLOUDFLARED_DIR}"
+export PATH="${CLOUDFLARED_DIR}:${PATH}"
 
 if [[ -z "$PROXY_URL" ]]; then
   echo "SIMDECK_PROXY_URL is required" >&2
@@ -39,6 +44,30 @@ runner_heartbeat() {
     --argjson reconnecting "${reconnecting}" \
     '{message:$message, runId:$runId, runUrl:$runUrl} + (if $reconnecting then {reconnecting:true} else {} end)')"
   post_json "/api/runner/heartbeat" "${body}" >/dev/null || true
+}
+
+install_cloudflared() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    runner_heartbeat "Cloudflare tunnel binary ready."
+    cloudflared --version || true
+    return 0
+  fi
+
+  runner_heartbeat "Downloading Cloudflare tunnel binary..."
+  local cloudflared_arch
+  case "$(uname -m)" in
+    arm64) cloudflared_arch="arm64" ;;
+    x86_64) cloudflared_arch="amd64" ;;
+    *)
+      echo "Unsupported macOS architecture: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+  curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${cloudflared_arch}.tgz" \
+    | tar -xz -C "${CLOUDFLARED_DIR}"
+  chmod +x "${CLOUDFLARED_DIR}/cloudflared"
+  runner_heartbeat "Cloudflare tunnel binary ready."
+  cloudflared --version
 }
 
 local_simdeck_request() {
@@ -135,14 +164,7 @@ if ! boot_default_simulator; then
 fi
 
 runner_heartbeat "Checking Cloudflare tunnel binary..."
-
-if ! command -v cloudflared >/dev/null 2>&1; then
-  runner_heartbeat "Installing Cloudflare tunnel binary..."
-  brew install cloudflared
-  runner_heartbeat "Cloudflare tunnel binary installed."
-else
-  runner_heartbeat "Cloudflare tunnel binary ready."
-fi
+install_cloudflared
 
 TUNNEL_LOG=""
 TUNNEL_PID=""
@@ -168,9 +190,22 @@ register_tunnel() {
 }
 
 wait_for_tunnel_reachable() {
+  local tunnel_host
+  tunnel_host="${TUNNEL_URL#https://}"
+  tunnel_host="${tunnel_host%%/*}"
   for attempt in $(seq 1 6); do
     runner_heartbeat "Checking Cloudflare tunnel reachability... (attempt ${attempt})"
     if curl --fail --silent --show-error --max-time 8 \
+      -H "accept: application/json" \
+      -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
+      "${TUNNEL_URL}/api/health" >/dev/null || \
+      curl --fail --silent --show-error --max-time 8 \
+      --resolve "${tunnel_host}:443:104.16.230.132" \
+      -H "accept: application/json" \
+      -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
+      "${TUNNEL_URL}/api/health" >/dev/null || \
+      curl --fail --silent --show-error --max-time 8 \
+      --resolve "${tunnel_host}:443:104.16.231.132" \
       -H "accept: application/json" \
       -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
       "${TUNNEL_URL}/api/health" >/dev/null; then
@@ -232,8 +267,21 @@ ensure_tunnel_healthy() {
   if [[ -z "${TUNNEL_URL}" ]] || ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
     return 1
   fi
+  local tunnel_host
+  tunnel_host="${TUNNEL_URL#https://}"
+  tunnel_host="${tunnel_host%%/*}"
   for _ in 1 2; do
     if curl --fail --silent --show-error --max-time 8 \
+      -H "accept: application/json" \
+      -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
+      "${TUNNEL_URL}/api/health" >/dev/null || \
+      curl --fail --silent --show-error --max-time 8 \
+      --resolve "${tunnel_host}:443:104.16.230.132" \
+      -H "accept: application/json" \
+      -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
+      "${TUNNEL_URL}/api/health" >/dev/null || \
+      curl --fail --silent --show-error --max-time 8 \
+      --resolve "${tunnel_host}:443:104.16.231.132" \
       -H "accept: application/json" \
       -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
       "${TUNNEL_URL}/api/health" >/dev/null; then

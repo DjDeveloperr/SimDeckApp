@@ -91,9 +91,12 @@ export class SimDeckSession extends DurableObject<Env> {
     }
 
     const now = Date.now();
+    const previousFailure = this.state.failure?.trim();
     await this.setState({
       state: "starting",
-      message: "Starting Mac...",
+      message: previousFailure
+        ? "Previous runner stopped before the tunnel was ready. Starting a new Mac..."
+        : "Starting Mac...",
       requestedAt: now,
       lastActivityAt: now,
       runnerBaseUrl: undefined,
@@ -280,9 +283,12 @@ export class SimDeckSession extends DurableObject<Env> {
     if (this.state.runId && shouldCheckRun) {
       const run = await this.findWorkflowRunById(this.state.runId);
       if (run?.status === "completed") {
+        const endedBeforeReady = this.state.state === "starting" && this.state.registeredAt === undefined;
         await this.setState({
-          state: "idle",
-          message: "Ready. Mac runner is cold.",
+          state: endedBeforeReady ? "failed" : "idle",
+          message: endedBeforeReady
+            ? "Mac runner stopped before the tunnel was ready."
+            : "Ready. Mac runner is cold.",
           runnerBaseUrl: undefined,
           runnerToken: undefined,
           runId: undefined,
@@ -290,9 +296,11 @@ export class SimDeckSession extends DurableObject<Env> {
           requestedAt: undefined,
           registeredAt: undefined,
           lastHeartbeatAt: undefined,
-          failure: run.conclusion && run.conclusion !== "success"
-            ? `Previous GitHub Actions runner completed with ${run.conclusion}.`
-            : undefined
+          failure: endedBeforeReady
+            ? `Previous GitHub Actions runner ended before registering a tunnel${run.conclusion ? ` (${run.conclusion})` : ""}.`
+            : run.conclusion && run.conclusion !== "success"
+              ? `Previous GitHub Actions runner completed with ${run.conclusion}.`
+              : undefined
         });
         return;
       }
