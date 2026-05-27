@@ -182,10 +182,10 @@ private struct SidebarView: View {
             }
         }
         .task(id: model.endpoint?.id) {
-            await model.refreshSimulatorsIfStale(maxAge: 0, silent: true)
+            await model.refreshSimulatorsIfStale(maxAge: 0, silent: true, activity: .passive)
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(6))
-                await model.refreshSimulatorsIfStale(maxAge: 5, silent: true)
+                await model.refreshSimulatorsIfStale(maxAge: 5, silent: true, activity: .passive)
             }
         }
         .navigationTitle("")

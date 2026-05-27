@@ -30,6 +30,11 @@ enum SimDeckAPIError: LocalizedError {
     }
 }
 
+enum RequestActivity: Sendable {
+    case active
+    case passive
+}
+
 struct SimDeckAPI: Sendable {
     let endpoint: SimDeckEndpoint
     var baseURL: URL { endpoint.baseURL }
@@ -54,8 +59,8 @@ struct SimDeckAPI: Sendable {
         try await simulatorsResponse().simulators
     }
 
-    func simulatorsResponse() async throws -> SimulatorsResponse {
-        try await decode(path: "/api/simulators")
+    func simulatorsResponse(activity: RequestActivity = .active) async throws -> SimulatorsResponse {
+        try await decode(path: "/api/simulators", activity: activity)
     }
 
     func simulatorCreateOptions() async throws -> SimulatorCreateOptionsResponse {
@@ -152,9 +157,18 @@ struct SimDeckAPI: Sendable {
         body: (some Encodable)? = Optional<String>.none,
         timeout: TimeInterval = 10,
         queryItems: [URLQueryItem] = [],
-        cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy
+        cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy,
+        activity: RequestActivity = .active
     ) async throws -> T {
-        let data = try await request(path: path, method: method, body: body, timeout: timeout, queryItems: queryItems, cachePolicy: cachePolicy)
+        let data = try await request(
+            path: path,
+            method: method,
+            body: body,
+            timeout: timeout,
+            queryItems: queryItems,
+            cachePolicy: cachePolicy,
+            activity: activity
+        )
         if data.isEmpty, T.self == EmptyResponse.self {
             return EmptyResponse() as! T
         }
@@ -167,7 +181,8 @@ struct SimDeckAPI: Sendable {
         body: (some Encodable)?,
         timeout: TimeInterval,
         queryItems: [URLQueryItem] = [],
-        cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy
+        cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy,
+        activity: RequestActivity = .active
     ) async throws -> Data {
         let (data, _) = try await requestWithHTTPResponse(
             path: path,
@@ -175,7 +190,8 @@ struct SimDeckAPI: Sendable {
             body: body,
             timeout: timeout,
             queryItems: queryItems,
-            cachePolicy: cachePolicy
+            cachePolicy: cachePolicy,
+            activity: activity
         )
         return data
     }
@@ -187,7 +203,8 @@ struct SimDeckAPI: Sendable {
         timeout: TimeInterval,
         queryItems: [URLQueryItem] = [],
         cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy,
-        allowUnauthorized: Bool = false
+        allowUnauthorized: Bool = false,
+        activity: RequestActivity = .active
     ) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url(for: path, queryItems: queryItems), cachePolicy: cachePolicy, timeoutInterval: timeout)
         request.httpMethod = method
@@ -195,6 +212,9 @@ struct SimDeckAPI: Sendable {
         request.setValue(originHeaderValue, forHTTPHeaderField: "Origin")
         if let token = endpoint.token?.nilIfBlank {
             request.setValue(token, forHTTPHeaderField: "X-SimDeck-Token")
+        }
+        if activity == .passive {
+            request.setValue("passive", forHTTPHeaderField: "X-SimDeck-Activity")
         }
         if let body {
             request.httpBody = try JSONEncoder().encode(AnyEncodable(body))

@@ -74,15 +74,19 @@ export class SimDeckSession extends DurableObject<Env> {
     };
   }
 
-  async ensureRunner(reason: string, proxyUrl: string): Promise<StatusResponse> {
+  async ensureRunner(reason: string, proxyUrl: string, countActivity = true): Promise<StatusResponse> {
     await this.reconcileStaleState();
     await this.refreshFromGitHubIfNeeded();
     if (this.state.state === "ready" && this.state.runnerBaseUrl) {
-      await this.recordActivity();
+      if (countActivity) {
+        await this.recordActivity();
+      }
       return this.status();
     }
     if (this.state.state === "starting") {
-      await this.recordActivity();
+      if (countActivity) {
+        await this.recordActivity();
+      }
       return this.status();
     }
 
@@ -445,13 +449,16 @@ export default {
       return json({ ok: false, error: "Not found" }, 404);
     }
 
-    const status = await session.ensureRunner(`${request.method} ${url.pathname}`, url.origin);
+    const countActivity = request.headers.get("x-simdeck-activity")?.toLowerCase() !== "passive";
+    const status = await session.ensureRunner(`${request.method} ${url.pathname}`, url.origin, countActivity);
     if (status.state !== "ready" || !status.runnerBaseUrl) {
       return coldResponse(url.pathname, status);
     }
 
-    ctx.waitUntil(session.recordActivity());
-    return proxyToRunner(request, status, session, url.pathname, url.origin);
+    if (countActivity) {
+      ctx.waitUntil(session.recordActivity());
+    }
+    return proxyToRunner(request, status, session, url.pathname, url.origin, countActivity);
   }
 };
 
@@ -590,7 +597,8 @@ async function proxyToRunner(
   status: StatusResponse,
   session: DurableObjectStub<SimDeckSession>,
   pathname: string,
-  proxyUrl: string
+  proxyUrl: string,
+  countActivity: boolean
 ): Promise<Response> {
   const upstream = new URL(request.url);
   upstream.protocol = "https:";
@@ -612,7 +620,7 @@ async function proxyToRunner(
   });
   if (response.status === 502 || response.status === 530) {
     await session.tunnelDisconnected();
-    const reconnectingStatus = await session.ensureRunner(`${request.method} ${pathname}`, proxyUrl);
+    const reconnectingStatus = await session.ensureRunner(`${request.method} ${pathname}`, proxyUrl, countActivity);
     if (pathname === "/api/simulators" || pathname === "/api/simulators/create-options") {
       return coldResponse(pathname, reconnectingStatus);
     }

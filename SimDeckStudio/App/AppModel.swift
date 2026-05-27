@@ -527,12 +527,12 @@ final class AppModel {
         return false
     }
 
-    func refreshSimulators(silent: Bool = false) async {
+    func refreshSimulators(silent: Bool = false, activity: RequestActivity = .active) async {
         guard let endpoint else { return }
         let previousSelectedID = selectedSimulatorID
         let wasSelectedBooted = selectedSimulator?.isBooted == true
         do {
-            let simulatorsResponse = try await SimDeckAPI(endpoint: endpoint).simulatorsResponse()
+            let simulatorsResponse = try await SimDeckAPI(endpoint: endpoint).simulatorsResponse(activity: activity)
             let refreshedSimulators = simulatorsResponse.simulators
             applyServerStatus(simulatorsResponse)
             guard shouldApplySimulatorList(simulatorsResponse) else {
@@ -573,10 +573,14 @@ final class AppModel {
         }
     }
 
-    func refreshSimulatorsIfStale(maxAge: TimeInterval = 5, silent: Bool = true) async {
+    func refreshSimulatorsIfStale(
+        maxAge: TimeInterval = 5,
+        silent: Bool = true,
+        activity: RequestActivity = .active
+    ) async {
         guard endpoint != nil else { return }
         guard Date().timeIntervalSince(lastSimulatorRefreshAt) >= maxAge else { return }
-        await refreshSimulators(silent: silent)
+        await refreshSimulators(silent: silent, activity: activity)
     }
 
     private func shouldApplySimulatorList(_ response: SimulatorsResponse) -> Bool {
@@ -1151,7 +1155,7 @@ final class AppModel {
         switch phase {
         case .active:
             streamClient?.appDidBecomeActive()
-            Task { await refreshSimulatorsIfStale(maxAge: 1, silent: true) }
+            Task { await refreshSimulatorsIfStale(maxAge: 1, silent: true, activity: .passive) }
             if endpoint?.usesCloudProxy == true,
                serverProxyStatus?.nilIfBlank?.lowercased() != "ready" || simulators.isEmpty {
                 startProxyReadinessPolling(autoStart: selectedSimulatorID != nil)
@@ -1207,7 +1211,7 @@ final class AppModel {
             var attempt = 0
             while !Task.isCancelled, self.endpoint?.usesCloudProxy == true {
                 attempt += 1
-                await self.refreshSimulators(silent: true)
+                await self.refreshSimulators(silent: true, activity: .passive)
                 guard !Task.isCancelled else { return }
 
                 let proxyStatus = self.serverProxyStatus?.nilIfBlank?.lowercased()
