@@ -153,6 +153,7 @@ final class AppModel {
     @ObservationIgnored private var connectionGeneration = 0
     @ObservationIgnored private var streamRequestGeneration = 0
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    @ObservationIgnored private var proxyReadinessTask: Task<Void, Never>?
     @ObservationIgnored private var lastReconnectStartedAt = Date.distantPast
     @ObservationIgnored private var chromeCache: [String: ChromeAssets] = [:]
     @ObservationIgnored private var chromeCacheOrder: [String] = []
@@ -275,6 +276,7 @@ final class AppModel {
     ) async -> Bool {
         connectionGeneration &+= 1
         let generation = connectionGeneration
+        cancelProxyReadinessPolling()
         let connectionEndpoint = endpointWithReusableToken(endpoint)
         isBusy = true
         status = "Connecting to \(connectionEndpoint.displayName)"
@@ -327,7 +329,9 @@ final class AppModel {
                     ? serverStatusMessage ?? "Connected. No simulators found."
                     : "Connected."
                 hapticSuccess()
-                if autoStart, selectedSimulatorID != nil {
+                if shouldContinuePollingProxy(simulatorsResponse) {
+                    startProxyReadinessPolling(autoStart: autoStart)
+                } else if autoStart, selectedSimulatorID != nil {
                     await prepareSelectedSimulator()
                 }
                 return true
@@ -536,6 +540,7 @@ final class AppModel {
                 if !silent {
                     status = serverStatusMessage ?? "Updating simulator list."
                     hapticSelection()
+                    startProxyReadinessPolling(autoStart: selectedSimulatorID != nil)
                 }
                 return
             }
@@ -579,6 +584,12 @@ final class AppModel {
             return true
         }
         return proxyStatus == "ready" || !response.simulators.isEmpty
+    }
+
+    private func shouldContinuePollingProxy(_ response: SimulatorsResponse) -> Bool {
+        guard endpoint?.usesCloudProxy == true else { return false }
+        let proxyStatus = response.proxyStatus?.nilIfBlank?.lowercased()
+        return proxyStatus != nil && (proxyStatus != "ready" || response.simulators.isEmpty)
     }
 
     func selectSimulator(_ udid: String?) {
@@ -1141,6 +1152,10 @@ final class AppModel {
         case .active:
             streamClient?.appDidBecomeActive()
             Task { await refreshSimulatorsIfStale(maxAge: 1, silent: true) }
+            if endpoint?.usesCloudProxy == true,
+               serverProxyStatus?.nilIfBlank?.lowercased() != "ready" || simulators.isEmpty {
+                startProxyReadinessPolling(autoStart: selectedSimulatorID != nil)
+            }
             if streamClient == nil, streamState == .disconnected || streamState == .failed {
                 scheduleStreamReconnect(reason: "foreground")
             }
@@ -1182,6 +1197,58 @@ final class AppModel {
                 try? await Task.sleep(for: .milliseconds(Int(delay * 1000)))
             }
         }
+    }
+
+    private func startProxyReadinessPolling(autoStart: Bool) {
+        guard endpoint?.usesCloudProxy == true else { return }
+        guard proxyReadinessTask == nil else { return }
+        proxyReadinessTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var attempt = 0
+            while !Task.isCancelled, self.endpoint?.usesCloudProxy == true {
+                attempt += 1
+                await self.refreshSimulators(silent: true)
+                guard !Task.isCancelled else { return }
+
+                let proxyStatus = self.serverProxyStatus?.nilIfBlank?.lowercased()
+                if proxyStatus == nil || proxyStatus == "ready" {
+                    if !self.simulators.isEmpty {
+                        if autoStart, self.selectedSimulatorID == nil {
+                            self.selectedSimulatorID = self.preferredSimulatorIDForAutoStart()
+                        }
+                        self.proxyReadinessTask = nil
+                        if autoStart, self.selectedSimulatorID != nil {
+                            await self.prepareSelectedSimulator()
+                        } else {
+                            self.status = "Connected."
+                        }
+                        return
+                    }
+                    if proxyStatus == "ready", attempt >= 6 {
+                        self.proxyReadinessTask = nil
+                        self.status = self.serverStatusMessage ?? "Connected. No simulators found."
+                        return
+                    }
+                } else {
+                    self.status = self.serverStatusMessage ?? "Starting Mac..."
+                }
+
+                let delay = attempt < 20 ? 2.0 : 5.0
+                try? await Task.sleep(for: .milliseconds(Int(delay * 1000)))
+            }
+            self.proxyReadinessTask = nil
+        }
+    }
+
+    private func cancelProxyReadinessPolling() {
+        proxyReadinessTask?.cancel()
+        proxyReadinessTask = nil
+    }
+
+    private func preferredSimulatorIDForAutoStart() -> String? {
+        endpoint?.preferredSimulatorID
+            ?? simulators.first(where: \.isBooted)?.udid
+            ?? simulators.first?.udid
     }
 
     private func postHardwareButton(
@@ -1642,6 +1709,7 @@ final class AppModel {
         streamRequestGeneration += 1
         reconnectTask?.cancel()
         reconnectTask = nil
+        cancelProxyReadinessPolling()
         streamClient?.disconnect()
         streamClient = nil
         endpoint = nil
