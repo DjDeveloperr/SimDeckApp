@@ -259,6 +259,47 @@ struct SimulatorMetadata: Identifiable, Hashable, Decodable, Sendable {
     }
 }
 
+struct ChromeDevToolsTargetDiscovery: Decodable, Sendable {
+    let udid: String
+    let targets: [ChromeDevToolsTarget]
+    let warnings: [String]
+}
+
+struct ChromeDevToolsTarget: Identifiable, Hashable, Decodable, Sendable {
+    let id: String
+    let title: String
+    let type: String
+    let url: String
+    let description: String
+    let devtoolsFrontendUrl: String
+    let webSocketDebuggerUrl: String
+    let source: String
+    let processIdentifier: Int
+    let bundleIdentifier: String?
+    let appName: String?
+}
+
+struct WebKitTargetDiscovery: Decodable, Sendable {
+    let udid: String
+    let socketPath: String?
+    let targets: [WebKitTarget]
+    let warnings: [String]
+}
+
+struct WebKitTarget: Identifiable, Hashable, Decodable, Sendable {
+    let id: String
+    let appId: String
+    let appName: String?
+    let appActive: Bool
+    let pageActive: Bool
+    let pageId: Int
+    let title: String?
+    let url: String?
+    let kind: String
+    let inspectorUrl: String
+    let webSocketUrl: String
+}
+
 struct AndroidSimulatorInfo: Hashable, Decodable, Sendable {
     let avdName: String?
     let grpcPort: Int?

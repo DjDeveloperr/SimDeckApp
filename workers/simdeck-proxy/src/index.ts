@@ -140,6 +140,7 @@ export class SimDeckSession extends DurableObject<Env> {
     if (!this.shouldAcceptRunnerRun(parsed.runId)) {
       return this.status();
     }
+    const now = Date.now();
     await this.setState({
       state: "ready",
       message: "Mac ready.",
@@ -147,9 +148,9 @@ export class SimDeckSession extends DurableObject<Env> {
       runnerToken: parsed.simdeckToken,
       runId: parsed.runId,
       runUrl: parsed.runUrl,
-      registeredAt: Date.now(),
-      lastHeartbeatAt: Date.now(),
-      lastActivityAt: this.state.lastActivityAt ?? Date.now(),
+      registeredAt: now,
+      lastHeartbeatAt: now,
+      lastActivityAt: now,
       failure: undefined
     });
     return this.status();
@@ -439,6 +440,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const session = env.SIMDECK_SESSION.getByName(SESSION_NAME);
+    const devToolsAssetPath = isDevToolsFrontendPath(url.pathname);
 
     if (url.pathname.startsWith("/api/runner/")) {
       return handleRunnerRequest(request, session, env);
@@ -452,7 +454,10 @@ export default {
       return handleLoginRequest(request, env);
     }
 
-    if (!(await isAuthorized(request, env.SIMDECK_ACCESS_TOKEN))) {
+    const authorized = await isAuthorized(request, env.SIMDECK_ACCESS_TOKEN, {
+      allowQueryToken: url.pathname.endsWith("/socket")
+    });
+    if (!authorized && !devToolsAssetPath) {
       return json({ ok: false, error: "Unauthorized" }, 401);
     }
 
@@ -465,14 +470,16 @@ export default {
       return json(await session.status());
     }
 
-    if (!url.pathname.startsWith("/api/")) {
+    if (!url.pathname.startsWith("/api/") && !devToolsAssetPath) {
       return json({ ok: false, error: "Not found" }, 404);
     }
 
-    const countActivity = request.headers.get("x-simdeck-activity")?.toLowerCase() !== "passive";
-    const status = await session.ensureRunner(`${request.method} ${url.pathname}`, url.origin, countActivity);
+    const countActivity = authorized && request.headers.get("x-simdeck-activity")?.toLowerCase() !== "passive";
+    const status = authorized
+      ? await session.ensureRunner(`${request.method} ${url.pathname}`, url.origin, countActivity)
+      : await session.status();
     if (status.state !== "ready" || !status.runnerBaseUrl) {
-      return coldResponse(url.pathname, status);
+      return authorized ? coldResponse(url.pathname, status) : json({ ok: false, error: "Unauthorized" }, 401);
     }
 
     if (countActivity) {
@@ -481,6 +488,13 @@ export default {
     return proxyToRunner(request, status, session, url.pathname, url.origin, countActivity);
   }
 };
+
+function isDevToolsFrontendPath(pathname: string): boolean {
+  return pathname.startsWith("/chrome-devtools-ui/")
+    || pathname === "/chrome-devtools-ui"
+    || pathname.startsWith("/webkit-inspector-ui/")
+    || pathname === "/webkit-inspector-ui";
+}
 
 async function handleLoginRequest(request: Request, env: Env): Promise<Response> {
   if (!env.CREDENTIALS_PASSWORD) {
@@ -725,7 +739,7 @@ async function isAuthorized(
   const url = new URL(request.url);
   const supplied = request.headers.get("x-simdeck-token")
     ?? bearerToken(request.headers.get("authorization"))
-    ?? (options.allowQueryToken ? url.searchParams.get("token") : undefined)
+    ?? (options.allowQueryToken ? url.searchParams.get("simdeckToken") ?? url.searchParams.get("token") : undefined)
     ?? "";
   return timingSafeEqual(supplied, expected);
 }

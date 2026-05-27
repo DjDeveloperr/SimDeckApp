@@ -117,6 +117,20 @@ struct SimDeckAPI: Sendable {
         )
     }
 
+    func webKitTargets(udid: String) async throws -> WebKitTargetDiscovery {
+        try await decode(
+            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/webkit/targets",
+            cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+        )
+    }
+
+    func chromeDevToolsTargets(udid: String) async throws -> ChromeDevToolsTargetDiscovery {
+        try await decode(
+            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/devtools/targets",
+            cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+        )
+    }
+
     func chromeImage(udid: String, stamp: String? = nil) async throws -> UIImage {
         let data = try await request(
             path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/chrome.png",

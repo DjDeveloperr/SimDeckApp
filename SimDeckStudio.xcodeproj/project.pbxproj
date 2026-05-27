@@ -10,8 +10,10 @@
 		32F600000000000000000101 /* SimDeckStudioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000201 /* SimDeckStudioApp.swift */; };
 		32F600000000000000000102 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000202 /* Models.swift */; };
 		32F600000000000000000103 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000203 /* AppModel.swift */; };
+		32F600000000000000000114 /* SpotlightIndexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000215 /* SpotlightIndexer.swift */; };
 		32F600000000000000000104 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000204 /* ContentView.swift */; };
 		32F600000000000000000105 /* SimulatorStreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000205 /* SimulatorStreamView.swift */; };
+		32F600000000000000000115 /* DevToolsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000216 /* DevToolsPanelView.swift */; };
 		32F600000000000000000106 /* SimDeckAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000206 /* SimDeckAPI.swift */; };
 		32F600000000000000000107 /* StudioLinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000207 /* StudioLinkResolver.swift */; };
 		32F600000000000000000108 /* SimDeckDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000208 /* SimDeckDiscovery.swift */; };
@@ -52,8 +54,10 @@
 		32F600000000000000000201 /* SimDeckStudioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimDeckStudioApp.swift; sourceTree = "<group>"; };
 		32F600000000000000000202 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		32F600000000000000000203 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		32F600000000000000000215 /* SpotlightIndexer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpotlightIndexer.swift; sourceTree = "<group>"; };
 		32F600000000000000000204 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		32F600000000000000000205 /* SimulatorStreamView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorStreamView.swift; sourceTree = "<group>"; };
+		32F600000000000000000216 /* DevToolsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevToolsPanelView.swift; sourceTree = "<group>"; };
 		32F600000000000000000206 /* SimDeckAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimDeckAPI.swift; sourceTree = "<group>"; };
 		32F600000000000000000207 /* StudioLinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioLinkResolver.swift; sourceTree = "<group>"; };
 		32F600000000000000000208 /* SimDeckDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimDeckDiscovery.swift; sourceTree = "<group>"; };
@@ -134,6 +138,7 @@
 				32F600000000000000000201 /* SimDeckStudioApp.swift */,
 				32F600000000000000000202 /* Models.swift */,
 				32F600000000000000000203 /* AppModel.swift */,
+				32F600000000000000000215 /* SpotlightIndexer.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -169,6 +174,7 @@
 			children = (
 				32F600000000000000000204 /* ContentView.swift */,
 				32F600000000000000000205 /* SimulatorStreamView.swift */,
+				32F600000000000000000216 /* DevToolsPanelView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -280,8 +286,10 @@
 				32F600000000000000000101 /* SimDeckStudioApp.swift in Sources */,
 				32F600000000000000000102 /* Models.swift in Sources */,
 				32F600000000000000000103 /* AppModel.swift in Sources */,
+				32F600000000000000000114 /* SpotlightIndexer.swift in Sources */,
 				32F600000000000000000104 /* ContentView.swift in Sources */,
 				32F600000000000000000105 /* SimulatorStreamView.swift in Sources */,
+				32F600000000000000000115 /* DevToolsPanelView.swift in Sources */,
 				32F600000000000000000106 /* SimDeckAPI.swift in Sources */,
 				32F600000000000000000107 /* StudioLinkResolver.swift in Sources */,
 				32F600000000000000000108 /* SimDeckDiscovery.swift in Sources */,

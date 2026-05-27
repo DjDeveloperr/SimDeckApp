@@ -7,12 +7,38 @@ struct ContentView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var searchText = ""
     @State private var searchExpanded = false
+    @State private var devToolsPanelPresented = false
 
     var body: some View {
-        navigationContent(usesSearchAccessory: true)
+        ZStack(alignment: .trailing) {
+            navigationContent(usesSearchAccessory: true)
+            rightEdgeDevToolsGesture
+        }
+        .sheet(isPresented: $devToolsPanelPresented) {
+            DevToolsPanelView(model: model)
+        }
         .task {
             model.start()
         }
+    }
+
+    private var rightEdgeDevToolsGesture: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .frame(width: 28)
+            .ignoresSafeArea()
+            .gesture(
+                DragGesture(minimumDistance: 24)
+                    .onEnded { value in
+                        guard value.translation.width < -48,
+                              abs(value.translation.width) > abs(value.translation.height) else {
+                            return
+                        }
+                        model.hapticSelection()
+                        devToolsPanelPresented = true
+                    }
+            )
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -785,6 +811,7 @@ private struct ServerSelectionSheet: View {
     @State private var detailPresentation: ServerDetailPresentation?
     @State private var renamingEndpoint: SimDeckEndpoint?
     @State private var renameText = ""
+    @State private var connectingEndpointID: String?
 
     private var hasServers: Bool {
         !model.savedEndpoints.isEmpty || !model.automaticEndpoints.isEmpty
@@ -898,24 +925,51 @@ private struct ServerSelectionSheet: View {
     }
 
     private func serverButton(_ endpoint: SimDeckEndpoint, saveEndpoint: Bool) -> some View {
-        Button {
-            model.hapticSelection()
-            detailPresentation = ServerDetailPresentation(endpoint: endpoint, saveEndpoint: saveEndpoint)
-        } label: {
-            HStack(spacing: 12) {
-                EndpointRow(endpoint: endpoint)
-                Spacer()
-                if model.endpoint?.baseURL == endpoint.baseURL {
-                    Image(systemName: "checkmark")
-                        .font(.headline)
-                        .foregroundStyle(.tint)
+        HStack(spacing: 12) {
+            Button {
+                connect(endpoint, saveEndpoint: saveEndpoint)
+            } label: {
+                HStack(spacing: 12) {
+                    EndpointRow(endpoint: endpoint)
+                    Spacer()
                 }
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .disabled(connectingEndpointID != nil)
+
+            if connectingEndpointID == endpoint.id {
+                ProgressView()
+            } else if model.endpoint?.baseURL == endpoint.baseURL {
+                Image(systemName: "checkmark")
+                    .font(.headline)
+                    .foregroundStyle(.tint)
+            }
+
+            Button {
+                model.hapticSelection()
+                detailPresentation = ServerDetailPresentation(endpoint: endpoint, saveEndpoint: saveEndpoint)
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Server Details")
+        }
+    }
+
+    private func connect(_ endpoint: SimDeckEndpoint, saveEndpoint: Bool) {
+        guard connectingEndpointID == nil else { return }
+        model.hapticSelection()
+        connectingEndpointID = endpoint.id
+        Task {
+            let connected = await model.connect(endpoint, autoStart: false, saveEndpoint: saveEndpoint)
+            connectingEndpointID = nil
+            if connected {
+                dismiss()
             }
         }
-        .buttonStyle(.plain)
     }
 
     private var renameAlertBinding: Binding<Bool> {

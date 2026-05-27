@@ -1,4 +1,5 @@
 import Foundation
+import CoreSpotlight
 import CryptoKit
 import Observation
 import SwiftUI
@@ -222,6 +223,7 @@ final class AppModel {
 
     func start() {
         loadSavedEndpoints()
+        SpotlightIndexer.indexServers(savedEndpoints)
         if let lastSelectedEndpoint = loadSelectedEndpoint() {
             isAutoConnecting = true
             discovery.upsert(lastSelectedEndpoint)
@@ -253,6 +255,9 @@ final class AppModel {
     }
 
     func handle(url: URL) {
+        if handleSpotlightURL(url) {
+            return
+        }
         guard let route = StudioLinkResolver.route(for: url) else {
             status = "Unsupported link."
             return
@@ -265,6 +270,41 @@ final class AppModel {
         case let .pairing(link, autoStart):
             Task { await pair(link, autoStart: autoStart) }
         }
+    }
+
+    func handle(userActivity: NSUserActivity) {
+        guard userActivity.activityType == CSSearchableItemActionType,
+              let identifier = userActivity.userInfo?[CSSearchableItemActivityIdentifier] as? String,
+              let url = URL(string: identifier) else {
+            return
+        }
+        handle(url: url)
+    }
+
+    private func handleSpotlightURL(_ url: URL) -> Bool {
+        guard url.scheme == "simdeck",
+              url.host(percentEncoded: false) == "spotlight",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let serverID = components.queryItems?.first(where: { $0.name == "server" })?.value?.nilIfBlank else {
+            return false
+        }
+        if savedEndpoints.isEmpty {
+            loadSavedEndpoints()
+        }
+        let candidates = savedEndpoints + [endpoint].compactMap(\.self)
+        guard var spotlightEndpoint = candidates.first(where: { $0.id == serverID }) else {
+            status = "Saved server not found."
+            hapticWarning()
+            return true
+        }
+        let simulatorID = components.queryItems?.first(where: { $0.name == "udid" })?.value?.nilIfBlank
+        if let simulatorID {
+            spotlightEndpoint.preferredSimulatorID = simulatorID
+        }
+        Task {
+            await connect(spotlightEndpoint, autoStart: simulatorID != nil, saveEndpoint: false)
+        }
+        return true
     }
 
     @discardableResult
@@ -315,6 +355,7 @@ final class AppModel {
                 self.endpoint = resolvedCandidate
                 self.authEndpoint = nil
                 self.simulators = simulators
+                SpotlightIndexer.indexSimulators(simulators, for: resolvedCandidate)
                 applyServerStatus(simulatorsResponse)
                 selectedSimulatorID = autoStart
                     ? resolvedCandidate.preferredSimulatorID
@@ -546,6 +587,7 @@ final class AppModel {
             }
             lastSimulatorRefreshAt = Date()
             simulators = refreshedSimulators
+            SpotlightIndexer.indexSimulators(refreshedSimulators, for: endpoint)
             if let previousSelectedID,
                !refreshedSimulators.contains(where: { $0.udid == previousSelectedID }) {
                 selectedSimulatorID = nil
@@ -766,6 +808,7 @@ final class AppModel {
             let bootError = await requestSimulatorBoot(api: api, udid: simulator.udid)
             let refreshedSimulators = try await waitForBootedSimulator(api: api, udid: simulator.udid, bootError: bootError)
             simulators = refreshedSimulators
+            SpotlightIndexer.indexSimulators(refreshedSimulators, for: endpoint)
             lastSimulatorRefreshAt = Date()
             status = "Started."
             simulatorLifecycleID = nil
@@ -832,6 +875,7 @@ final class AppModel {
             let api = SimDeckAPI(endpoint: endpoint)
             try await api.shutdownSimulator(udid: simulator.udid)
             simulators = try await api.simulators()
+            SpotlightIndexer.indexSimulators(simulators, for: endpoint)
             lastSimulatorRefreshAt = Date()
             status = "Stopped."
             simulatorLifecycleID = nil
@@ -877,6 +921,7 @@ final class AppModel {
             } else {
                 simulators = refreshed
             }
+            SpotlightIndexer.indexSimulators(simulators, for: endpoint)
             selectedSimulatorID = response.simulator.udid
             resetStreamPresentation()
             status = "Created \(response.simulator.name)."
@@ -1678,6 +1723,7 @@ final class AppModel {
 
     func deleteSavedEndpoint(_ endpoint: SimDeckEndpoint) {
         savedEndpoints.removeAll { endpointsRepresentSameServer($0, endpoint) }
+        SpotlightIndexer.removeSimulatorIndex(for: endpoint)
         if let selectedEndpoint = loadSelectedEndpoint(),
            endpointsRepresentSameServer(selectedEndpoint, endpoint) {
             UserDefaults.standard.removeObject(forKey: Self.selectedEndpointKey)
@@ -1706,6 +1752,7 @@ final class AppModel {
         manualToken = ""
         pairingCode = ""
         status = "Connections reset."
+        SpotlightIndexer.removeAll()
         hapticWarning()
     }
 
@@ -1949,11 +1996,13 @@ final class AppModel {
         UserDefaults.standard.removeObject(forKey: Self.legacyRecentEndpointsKey)
         guard !savedEndpoints.isEmpty else {
             UserDefaults.standard.removeObject(forKey: Self.savedEndpointsKey)
+            SpotlightIndexer.indexServers([])
             return
         }
         if let data = try? JSONEncoder().encode(savedEndpoints) {
             UserDefaults.standard.set(data, forKey: Self.savedEndpointsKey)
         }
+        SpotlightIndexer.indexServers(savedEndpoints)
     }
 
     private func uniqued(_ endpoints: [SimDeckEndpoint]) -> [SimDeckEndpoint] {

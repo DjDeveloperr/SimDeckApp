@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import CoreSpotlight
 
 final class AppOrientationDelegate: NSObject, UIApplicationDelegate {
     static var supportedOrientations: UIInterfaceOrientationMask = .portrait
@@ -63,6 +64,9 @@ struct SimDeckStudioApp: App {
         ContentView(model: model)
             .onOpenURL { url in
                 model.handle(url: url)
+            }
+            .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                model.handle(userActivity: activity)
             }
             .onChange(of: scenePhase) { _, phase in
                 model.handleScenePhase(phase)
