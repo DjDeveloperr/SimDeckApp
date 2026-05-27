@@ -183,23 +183,56 @@ ensure_tunnel_healthy() {
   if [[ -z "${TUNNEL_URL}" ]] || ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
     return 1
   fi
-  curl --fail --silent --show-error --max-time 8 \
-    -H "accept: application/json" \
-    -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
-    "${TUNNEL_URL}/api/health" >/dev/null
+  for _ in 1 2; do
+    if curl --fail --silent --show-error --max-time 8 \
+      -H "accept: application/json" \
+      -H "x-simdeck-token: ${SIMDECK_TOKEN}" \
+      "${TUNNEL_URL}/api/health" >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
-if ! start_tunnel; then
-  post_json "/api/runner/heartbeat" "{\"message\":\"Cloudflare tunnel failed to start.\",\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
-  exit 1
+start_tunnel_until_registered() {
+  local reason="$1"
+  local attempt=0 keepalive should_stop delay
+  while true; do
+    attempt=$((attempt + 1))
+    if start_tunnel; then
+      return 0
+    fi
+    post_json "/api/runner/heartbeat" "{\"message\":\"${reason} Retrying tunnel...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+    if keepalive="$(post_json "/api/runner/keepalive" "{\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" 2>/dev/null)"; then
+      should_stop="$(echo "${keepalive}" | jq -r '.shouldStop // false')"
+      if [[ "${should_stop}" == "true" ]]; then
+        return 1
+      fi
+    fi
+    delay=$((attempt < 5 ? attempt * 3 : 15))
+    sleep "${delay}"
+  done
+}
+
+if ! start_tunnel_until_registered "Opening Cloudflare tunnel failed."; then
+  exit 0
 fi
 
 while true; do
   if ! ensure_tunnel_healthy; then
     post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
-    start_tunnel || exit 1
+    start_tunnel_until_registered "Tunnel disconnected." || break
   fi
-  KEEPALIVE="$(post_json "/api/runner/keepalive" "{\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}")"
+  if ! KEEPALIVE="$(post_json "/api/runner/keepalive" "{\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}")"; then
+    echo "SimDeck keepalive failed; retrying after tunnel health check" >&2
+    if ! ensure_tunnel_healthy; then
+      post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
+      start_tunnel_until_registered "Tunnel disconnected." || break
+    fi
+    sleep 15
+    continue
+  fi
   SHOULD_STOP="$(echo "${KEEPALIVE}" | jq -r '.shouldStop')"
   SHOULD_REOPEN_TUNNEL="$(echo "${KEEPALIVE}" | jq -r '.shouldReopenTunnel')"
   IDLE_FOR="$(echo "${KEEPALIVE}" | jq -r '.idleForSeconds')"
@@ -209,7 +242,7 @@ while true; do
   fi
   if [[ "$SHOULD_REOPEN_TUNNEL" == "true" ]]; then
     post_json "/api/runner/heartbeat" "{\"message\":\"Tunnel disconnected. Reopening...\",\"reconnecting\":true,\"runId\":\"${GH_RUN_ID:-}\",\"runUrl\":\"${GH_RUN_URL:-}\"}" >/dev/null || true
-    start_tunnel || exit 1
+    start_tunnel_until_registered "Tunnel disconnected." || break
   fi
   sleep 15
 done

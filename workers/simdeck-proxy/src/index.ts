@@ -123,9 +123,7 @@ export class SimDeckSession extends DurableObject<Env> {
     await this.setState({
       ...this.state,
       state: "starting",
-      message: "Tunnel disconnected. Reopening...",
-      runnerBaseUrl: undefined,
-      runnerToken: undefined
+      message: "Tunnel disconnected. Reopening..."
     });
     return this.status();
   }
@@ -133,6 +131,9 @@ export class SimDeckSession extends DurableObject<Env> {
   async register(payload: unknown): Promise<StatusResponse> {
     const parsed = parseRunnerPayload(payload);
     await this.refreshFromGitHubIfNeeded(true);
+    if (this.state.state === "idle" || this.state.state === "failed") {
+      return this.status();
+    }
     if (!this.shouldAcceptRunnerRun(parsed.runId)) {
       return this.status();
     }
@@ -157,14 +158,16 @@ export class SimDeckSession extends DurableObject<Env> {
     const runId = readString(payload, "runId");
     const runUrl = readString(payload, "runUrl");
     await this.refreshFromGitHubIfNeeded(true);
+    if (this.state.state === "idle" || this.state.state === "failed") {
+      return this.status();
+    }
     if (!this.shouldAcceptRunnerRun(runId)) {
       return this.status();
     }
     await this.setState({
       ...this.state,
-      state: reconnecting || this.state.state === "idle" ? "starting" : this.state.state,
+      state: reconnecting ? "starting" : this.state.state,
       message: message ?? this.state.message,
-      runnerBaseUrl: reconnecting ? undefined : this.state.runnerBaseUrl,
       runId: runId ?? this.state.runId,
       runUrl: runUrl ?? this.state.runUrl,
       lastHeartbeatAt: Date.now()
@@ -173,18 +176,29 @@ export class SimDeckSession extends DurableObject<Env> {
   }
 
   async keepalive(payload: unknown): Promise<{ shouldStop: boolean; shouldReopenTunnel: boolean; idleForSeconds: number; status: StatusResponse }> {
+    await this.reconcileStaleState();
     await this.refreshFromGitHubIfNeeded();
     const runId = readString(payload, "runId");
+    if (this.state.state === "idle" || this.state.state === "failed") {
+      return { shouldStop: true, shouldReopenTunnel: false, idleForSeconds: 0, status: await this.status() };
+    }
     if (!this.shouldAcceptRunnerRun(runId)) {
       return { shouldStop: true, shouldReopenTunnel: false, idleForSeconds: 0, status: await this.status() };
     }
-    const tunnelHealthy = await this.isRunnerTunnelHealthy();
-    if (!tunnelHealthy && this.state.state === "ready") {
+    const reconnectWasRequested = this.state.state === "starting" && this.state.registeredAt !== undefined;
+    const tunnelHealthy = reconnectWasRequested ? false : await this.isRunnerTunnelHealthy();
+    const now = Date.now();
+    if (!tunnelHealthy && (this.state.state === "ready" || this.state.state === "starting")) {
       await this.setState({
         ...this.state,
         state: "starting",
         message: "Tunnel disconnected. Reopening...",
-        runnerBaseUrl: undefined
+        lastHeartbeatAt: now
+      });
+    } else {
+      await this.setState({
+        ...this.state,
+        lastHeartbeatAt: now
       });
     }
     const lastActivityAt = this.state.lastActivityAt ?? this.state.requestedAt ?? Date.now();
@@ -204,7 +218,7 @@ export class SimDeckSession extends DurableObject<Env> {
         failure: undefined
       });
     }
-    return { shouldStop, shouldReopenTunnel: !tunnelHealthy, idleForSeconds, status: await this.status() };
+    return { shouldStop, shouldReopenTunnel: reconnectWasRequested || !tunnelHealthy, idleForSeconds, status: await this.status() };
   }
 
   async reset(): Promise<StatusResponse> {
@@ -290,9 +304,7 @@ export class SimDeckSession extends DurableObject<Env> {
         await this.setState({
           ...this.state,
           state: "starting",
-          message: "Tunnel disconnected. Reopening...",
-          runnerBaseUrl: undefined,
-          runnerToken: undefined
+          message: "Tunnel disconnected. Reopening..."
         });
       }
       return;
@@ -612,31 +624,42 @@ async function proxyToRunner(
     headers.set("x-simdeck-token", status.runnerToken);
   }
 
-  const response = await fetch(upstream, {
-    method: request.method,
-    headers,
-    body: request.body,
-    redirect: "manual"
-  });
+  let response: Response;
+  try {
+    response = await fetch(upstream, {
+      method: request.method,
+      headers,
+      body: request.body,
+      redirect: "manual"
+    });
+  } catch {
+    await session.tunnelDisconnected();
+    const reconnectingStatus = await session.ensureRunner(`${request.method} ${pathname}`, proxyUrl, countActivity);
+    return runnerReconnectingResponse(pathname, reconnectingStatus);
+  }
   if (response.status === 502 || response.status === 530) {
     await session.tunnelDisconnected();
     const reconnectingStatus = await session.ensureRunner(`${request.method} ${pathname}`, proxyUrl, countActivity);
-    if (pathname === "/api/simulators" || pathname === "/api/simulators/create-options") {
-      return coldResponse(pathname, reconnectingStatus);
-    }
-    return json({
-      ok: false,
-      error: "Runner tunnel is reconnecting.",
-      proxyStatus: reconnectingStatus.state,
-      statusMessage: reconnectingStatus.message,
-      runId: reconnectingStatus.runId,
-      runUrl: reconnectingStatus.runUrl
-    }, 503);
+    return runnerReconnectingResponse(pathname, reconnectingStatus);
   }
   if (pathname === "/api/simulators" && response.ok) {
     return normalizedSimulatorsResponse(response);
   }
   return response;
+}
+
+function runnerReconnectingResponse(pathname: string, status: StatusResponse): Response {
+  if (pathname === "/api/simulators" || pathname === "/api/simulators/create-options") {
+    return coldResponse(pathname, status);
+  }
+  return json({
+    ok: false,
+    error: "Runner tunnel is reconnecting.",
+    proxyStatus: status.state,
+    statusMessage: status.message,
+    runId: status.runId,
+    runUrl: status.runUrl
+  }, 503);
 }
 
 async function normalizedSimulatorsResponse(response: Response): Promise<Response> {
