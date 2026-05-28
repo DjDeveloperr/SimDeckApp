@@ -7,38 +7,107 @@ struct ContentView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var searchText = ""
     @State private var searchExpanded = false
-    @State private var devToolsPanelPresented = false
+    @State private var devToolsDrawerPresented = false
+    @GestureState private var devToolsDrawerDrag: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .trailing) {
             navigationContent(usesSearchAccessory: true)
-            rightEdgeDevToolsGesture
-        }
-        .sheet(isPresented: $devToolsPanelPresented) {
-            DevToolsPanelView(model: model)
+            devToolsDrawerLayer
         }
         .task {
             model.start()
         }
     }
 
-    private var rightEdgeDevToolsGesture: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .frame(width: 28)
-            .ignoresSafeArea()
-            .gesture(
-                DragGesture(minimumDistance: 24)
-                    .onEnded { value in
-                        guard value.translation.width < -48,
-                              abs(value.translation.width) > abs(value.translation.height) else {
-                            return
+    private var devToolsDrawerLayer: some View {
+        GeometryReader { proxy in
+            let drawerWidth = devToolsDrawerWidth(for: proxy.size)
+            let progress = devToolsDrawerProgress(width: drawerWidth)
+            ZStack(alignment: .trailing) {
+                if progress > 0.01 {
+                    Color.black
+                        .opacity(0.22 * progress)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            closeDevToolsDrawer()
                         }
-                        model.hapticSelection()
-                        devToolsPanelPresented = true
+                        .transition(.opacity)
+                }
+
+                DevToolsPanelView(model: model) {
+                    closeDevToolsDrawer()
+                }
+                .frame(width: drawerWidth)
+                .frame(maxHeight: .infinity)
+                .background(.regularMaterial)
+                .clipShape(.rect(cornerRadius: usesCompactRootNavigation ? 0 : 18))
+                .shadow(color: .black.opacity(0.24 * progress), radius: 28, x: -8, y: 0)
+                .offset(x: drawerWidth * (1 - progress))
+                .simultaneousGesture(devToolsDrawerGesture(width: drawerWidth))
+                .allowsHitTesting(progress > 0.01)
+                .ignoresSafeArea()
+
+                if !devToolsDrawerPresented {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .frame(width: 32)
+                        .ignoresSafeArea()
+                        .gesture(devToolsDrawerGesture(width: drawerWidth))
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .trailing)
+            .animation(.snappy(duration: 0.24), value: devToolsDrawerPresented)
+        }
+    }
+
+    private func devToolsDrawerWidth(for size: CGSize) -> CGFloat {
+        if usesCompactRootNavigation {
+            return max(320, size.width - 18)
+        }
+        return min(max(420, size.width * 0.42), 560)
+    }
+
+    private func devToolsDrawerProgress(width: CGFloat) -> CGFloat {
+        let base = devToolsDrawerPresented ? 1.0 : 0.0
+        let dragDelta = -devToolsDrawerDrag / max(width, 1)
+        return min(1, max(0, base + dragDelta))
+    }
+
+    private func devToolsDrawerGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .updating($devToolsDrawerDrag) { value, state, _ in
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                state = value.translation.width
+            }
+            .onEnded { value in
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                let projected = value.predictedEndTranslation.width
+                if devToolsDrawerPresented {
+                    if value.translation.width > width * 0.18 || projected > width * 0.24 {
+                        closeDevToolsDrawer()
+                    } else {
+                        openDevToolsDrawer()
                     }
-            )
-            .accessibilityHidden(true)
+                } else if value.translation.width < -width * 0.12 || projected < -width * 0.18 {
+                    openDevToolsDrawer()
+                }
+            }
+    }
+
+    private func openDevToolsDrawer() {
+        model.hapticSelection()
+        withAnimation(.snappy(duration: 0.24)) {
+            devToolsDrawerPresented = true
+        }
+    }
+
+    private func closeDevToolsDrawer() {
+        model.hapticSelection()
+        withAnimation(.snappy(duration: 0.22)) {
+            devToolsDrawerPresented = false
+        }
     }
 
     @ViewBuilder
@@ -1157,14 +1226,18 @@ private struct PairServerSheet: View {
             model.hapticSelection()
             isScanning = true
         } label: {
-            Text("Pair")
+            Label("Pair", systemImage: "checkmark.seal")
                 .font(.headline)
-                .foregroundStyle(.primary)
+                .foregroundStyle(.white)
                 .frame(width: 180, height: 52)
                 .contentShape(Capsule())
+                .background {
+                    Capsule()
+                        .fill(.tint)
+                        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
+                }
         }
         .buttonStyle(.plain)
-        .modifier(GlassCapsuleModifier(interactive: true))
     }
 }
 

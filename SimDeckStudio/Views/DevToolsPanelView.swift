@@ -49,11 +49,25 @@ private enum DevToolsPanelTarget: Identifiable, Hashable {
             target.devtoolsFrontendUrl
         }
     }
+
+    var wrapsInFrame: Bool {
+        switch self {
+        case .webKit:
+            true
+        case .chrome:
+            false
+        }
+    }
+}
+
+private struct DevToolsWebViewState: Equatable {
+    var message: String?
+    var isError = false
 }
 
 struct DevToolsPanelView: View {
     @Bindable var model: AppModel
-    @Environment(\.dismiss) private var dismiss
+    let close: () -> Void
     @State private var selectedUDID: String?
     @State private var webKitTargets: [WebKitTarget] = []
     @State private var chromeTargets: [ChromeDevToolsTarget] = []
@@ -63,6 +77,7 @@ struct DevToolsPanelView: View {
     @State private var selectedTarget: DevToolsPanelTarget?
     @State private var reloadID = UUID()
     @State private var loadGeneration = 0
+    @State private var webViewState = DevToolsWebViewState()
 
     private var selectedSimulator: SimulatorMetadata? {
         let udid = selectedUDID ?? model.selectedSimulatorID
@@ -75,8 +90,32 @@ struct DevToolsPanelView: View {
                 if let selectedTarget,
                    let endpoint = model.endpoint,
                    let url = frontendURL(for: selectedTarget, endpoint: endpoint) {
-                    EmbeddedDevToolsWebView(url: url, token: endpoint.token, reloadID: reloadID)
+                    ZStack(alignment: .bottom) {
+                        EmbeddedDevToolsWebView(
+                            url: url,
+                            token: endpoint.token,
+                            wrapsInFrame: selectedTarget.wrapsInFrame,
+                            reloadID: reloadID,
+                            loadState: $webViewState
+                        )
                         .ignoresSafeArea(edges: .bottom)
+
+                        if let message = webViewState.message {
+                            Label(message, systemImage: webViewState.isError ? "exclamationmark.triangle" : "network")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(3)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.regularMaterial, in: .rect(cornerRadius: 8))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .strokeBorder(Color.primary.opacity(webViewState.isError ? 0.28 : 0.12))
+                                }
+                                .padding(10)
+                        }
+                    }
                 } else {
                     targetList
                 }
@@ -87,7 +126,7 @@ struct DevToolsPanelView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(selectedTarget == nil ? "Done" : "Targets") {
                         if selectedTarget == nil {
-                            dismiss()
+                            close()
                         } else {
                             self.selectedTarget = nil
                         }
@@ -115,6 +154,20 @@ struct DevToolsPanelView: View {
         .onChange(of: selectedUDID) {
             selectedTarget = nil
             Task { await loadTargets() }
+        }
+        .onChange(of: model.endpoint?.id) {
+            selectedTarget = nil
+            selectedUDID = selectedUDID ?? model.selectedSimulatorID ?? model.simulators.first?.udid
+            Task { await loadTargets() }
+        }
+        .onChange(of: model.selectedSimulatorID) { _, udid in
+            guard selectedUDID == nil || selectedUDID == udid else { return }
+            selectedTarget = nil
+            selectedUDID = udid ?? model.simulators.first?.udid
+            Task { await loadTargets() }
+        }
+        .onChange(of: selectedTarget?.id) {
+            webViewState = DevToolsWebViewState(message: "Loading inspector...", isError: false)
         }
     }
 
@@ -270,19 +323,25 @@ struct DevToolsPanelView: View {
         guard let absolute = URL(string: target.frontendPath, relativeTo: endpoint.baseURL)?.absoluteURL else {
             return nil
         }
-        return absolute.addingSimDeckTokenToDevToolsWebSocket(endpoint.token)
+        return absolute
+            .addingSimDeckTokenToPageQuery(endpoint.token)
+            .addingSimDeckTokenToDevToolsWebSocket(endpoint.token)
     }
 }
 
 private struct EmbeddedDevToolsWebView: UIViewRepresentable {
     let url: URL
     let token: String?
+    let wrapsInFrame: Bool
     let reloadID: UUID
+    @Binding var loadState: DevToolsWebViewState
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
+        configuration.userContentController.add(context.coordinator, name: "simdeckInspector")
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
         }
@@ -291,27 +350,167 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.loadedURL != url || context.coordinator.reloadID != reloadID else { return }
+        context.coordinator.loadState = $loadState
+        guard context.coordinator.loadedURL != url
+            || context.coordinator.reloadID != reloadID
+            || context.coordinator.wrapsInFrame != wrapsInFrame else {
+            return
+        }
         context.coordinator.loadedURL = url
         context.coordinator.reloadID = reloadID
-        var request = URLRequest(url: url)
-        if let token = token?.nilIfBlank {
-            request.setValue(token, forHTTPHeaderField: "X-SimDeck-Token")
+        context.coordinator.wrapsInFrame = wrapsInFrame
+        loadState = DevToolsWebViewState(message: "Loading inspector...", isError: false)
+        let loadInspector = {
+            if wrapsInFrame {
+                webView.loadHTMLString(Self.wrapperHTML(for: url), baseURL: url)
+            } else {
+                var request = URLRequest(url: url)
+                if let token = token?.nilIfBlank {
+                    request.setValue(token, forHTTPHeaderField: "X-SimDeck-Token")
+                }
+                webView.load(request)
+            }
         }
-        webView.load(request)
+        if let token = token?.nilIfBlank,
+           let cookie = Self.accessCookie(token: token, url: url) {
+            webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+                loadInspector()
+            }
+        } else {
+            loadInspector()
+        }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(loadState: $loadState)
     }
 
-    final class Coordinator {
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "simdeckInspector")
+        uiView.navigationDelegate = nil
+    }
+
+    private static func wrapperHTML(for url: URL) -> String {
+        let urlLiteral = javaScriptLiteral(url.absoluteString)
+        return """
+        <!doctype html>
+        <html>
+        <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+        <style>
+        html, body, iframe { width: 100%; height: 100%; margin: 0; padding: 0; border: 0; background: #111; }
+        body { overflow: hidden; }
+        </style>
+        </head>
+        <body>
+        <iframe id="inspector" allow="clipboard-read; clipboard-write"></iframe>
+        <script>
+        window.addEventListener("message", function(event) {
+            try { window.webkit.messageHandlers.simdeckInspector.postMessage(event.data); } catch (_) {}
+        });
+        document.getElementById("inspector").src = \(urlLiteral);
+        </script>
+        </body>
+        </html>
+        """
+    }
+
+    private static func javaScriptLiteral(_ value: String) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+              let literal = String(data: data, encoding: .utf8) else {
+            return "\"\""
+        }
+        return literal
+    }
+
+    private static func accessCookie(token: String, url: URL) -> HTTPCookie? {
+        guard let host = url.host(percentEncoded: false) else { return nil }
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .domain: host,
+            .path: "/",
+            .name: "simdeck_token",
+            .value: token,
+            .expires: Date().addingTimeInterval(60 * 60)
+        ]
+        if url.scheme?.lowercased() == "https" {
+            properties[.secure] = "TRUE"
+        }
+        return HTTPCookie(properties: properties)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var loadedURL: URL?
         var reloadID: UUID?
+        var wrapsInFrame = false
+        var loadState: Binding<DevToolsWebViewState>
+
+        init(loadState: Binding<DevToolsWebViewState>) {
+            self.loadState = loadState
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            loadState.wrappedValue = DevToolsWebViewState(message: "Loading inspector...", isError: false)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            if !wrapsInFrame {
+                loadState.wrappedValue = DevToolsWebViewState()
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            loadState.wrappedValue = DevToolsWebViewState(message: "Inspector failed: \(error.localizedDescription)", isError: true)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            loadState.wrappedValue = DevToolsWebViewState(message: "Inspector failed: \(error.localizedDescription)", isError: true)
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let payload = message.body as? [String: Any],
+                  let type = payload["type"] as? String else {
+                return
+            }
+            if type == "simdeck:webkit-inspector:health" {
+                let state = payload["state"] as? String ?? "loading"
+                let reason = payload["reason"] as? String
+                switch state {
+                case "ready":
+                    loadState.wrappedValue = DevToolsWebViewState()
+                case "stalled":
+                    loadState.wrappedValue = DevToolsWebViewState(
+                        message: "Inspector connected, waiting for page content\(reason.map { ": \($0)" } ?? ".")",
+                        isError: false
+                    )
+                default:
+                    loadState.wrappedValue = DevToolsWebViewState(
+                        message: "Inspector \(state)\(reason.map { ": \($0)" } ?? "...")",
+                        isError: false
+                    )
+                }
+            } else if type == "simdeck:webkit-inspector:socket",
+                      let state = payload["state"] as? String,
+                      state != "open" {
+                loadState.wrappedValue = DevToolsWebViewState(message: "Inspector socket \(state)...", isError: false)
+            }
+        }
     }
 }
 
 private extension URL {
+    func addingSimDeckTokenToPageQuery(_ token: String?) -> URL {
+        guard let token = token?.nilIfBlank,
+              var components = URLComponents(url: self, resolvingAgainstBaseURL: false) else {
+            return self
+        }
+        var queryItems = components.queryItems ?? []
+        if !queryItems.contains(where: { $0.name == "simdeckToken" }) {
+            queryItems.append(URLQueryItem(name: "simdeckToken", value: token))
+        }
+        components.queryItems = queryItems
+        return components.url ?? self
+    }
+
     func addingSimDeckTokenToDevToolsWebSocket(_ token: String?) -> URL {
         guard let token = token?.nilIfBlank,
               var components = URLComponents(url: self, resolvingAgainstBaseURL: false),
