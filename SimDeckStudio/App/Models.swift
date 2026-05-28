@@ -443,6 +443,7 @@ struct ChromeButtonProfile: Hashable, Codable, Sendable {
     let type: String?
     let imageName: String?
     let imageDownName: String?
+    let imageDownDrawMode: String?
     let x: Double
     let y: Double
     let width: Double
@@ -452,6 +453,8 @@ struct ChromeButtonProfile: Hashable, Codable, Sendable {
     let usagePage: Int?
     let usage: Int?
     let onTop: Bool?
+    let normalOffset: ChromeButtonOffset?
+    let rolloverOffset: ChromeButtonOffset?
 
     var assetStamp: String {
         [
@@ -459,6 +462,7 @@ struct ChromeButtonProfile: Hashable, Codable, Sendable {
             sanitized(type),
             sanitized(imageName),
             sanitized(imageDownName),
+            sanitized(imageDownDrawMode),
             sanitized(anchor),
             sanitized(align),
             onTop == true ? "top" : "under",
@@ -466,6 +470,10 @@ struct ChromeButtonProfile: Hashable, Codable, Sendable {
             stampValue(y),
             stampValue(width),
             stampValue(height),
+            stampValue(normalOffset?.x ?? 0),
+            stampValue(normalOffset?.y ?? 0),
+            stampValue(rolloverOffset?.x ?? 0),
+            stampValue(rolloverOffset?.y ?? 0),
             usagePage.map(String.init) ?? "",
             usage.map(String.init) ?? ""
         ].joined(separator: ".")
@@ -483,6 +491,11 @@ struct ChromeButtonProfile: Hashable, Codable, Sendable {
         }
         .reduce(into: "") { $0.append($1) }
     }
+}
+
+struct ChromeButtonOffset: Hashable, Codable, Sendable {
+    let x: Double
+    let y: Double
 }
 
 struct SimulatorsResponse: Decodable, Sendable {

@@ -131,13 +131,34 @@ struct SimDeckAPI: Sendable {
         )
     }
 
-    func chromeImage(udid: String, stamp: String? = nil) async throws -> UIImage {
+    func chromeImage(udid: String, stamp: String? = nil, includeButtons: Bool = true) async throws -> UIImage {
         let data = try await request(
             path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/chrome.png",
             method: "GET",
             body: Optional<String>.none,
             timeout: 10,
-            queryItems: Self.assetQueryItems(stamp: stamp),
+            queryItems: Self.assetQueryItems(
+                stamp: stamp,
+                extra: includeButtons ? [] : [URLQueryItem(name: "buttons", value: "false")]
+            ),
+            cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+        )
+        guard let image = UIImage(data: data) else {
+            throw SimDeckAPIError.invalidResponse
+        }
+        return image
+    }
+
+    func chromeButtonImage(udid: String, button: String, pressed: Bool, stamp: String? = nil) async throws -> UIImage {
+        let data = try await request(
+            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/chrome-button/\(button.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? button).png",
+            method: "GET",
+            body: Optional<String>.none,
+            timeout: 10,
+            queryItems: Self.assetQueryItems(
+                stamp: stamp,
+                extra: pressed ? [URLQueryItem(name: "pressed", value: "true")] : []
+            ),
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
         )
         guard let image = UIImage(data: data) else {
@@ -287,9 +308,9 @@ struct SimDeckAPI: Sendable {
         return components.url ?? baseURL.appendingPathComponent(path)
     }
 
-    private static func assetQueryItems(stamp: String?) -> [URLQueryItem] {
-        guard let stamp = stamp?.nilIfBlank else { return [] }
-        return [URLQueryItem(name: "stamp", value: stamp)]
+    private static func assetQueryItems(stamp: String?, extra: [URLQueryItem] = []) -> [URLQueryItem] {
+        guard let stamp = stamp?.nilIfBlank else { return extra }
+        return [URLQueryItem(name: "stamp", value: stamp)] + extra
     }
 }
 

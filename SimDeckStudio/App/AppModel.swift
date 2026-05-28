@@ -92,10 +92,28 @@ private struct ChromeAssets {
     var profile: ChromeProfile?
     var image: UIImage?
     var screenMask: UIImage?
+    var buttonImages: [String: ChromeButtonImages] = [:]
 
     var isEmpty: Bool {
-        profile == nil && image == nil && screenMask == nil
+        profile == nil && image == nil && screenMask == nil && buttonImages.isEmpty
     }
+}
+
+struct ChromeButtonImages: @unchecked Sendable {
+    var normal: UIImage?
+    var pressed: UIImage?
+}
+
+private enum ConnectionAttemptResult: Sendable {
+    case connected(candidate: SimDeckEndpoint, health: HealthResponse, simulatorsResponse: SimulatorsResponse)
+    case pairingRequired(candidate: SimDeckEndpoint, health: HealthResponse?)
+    case failed(String)
+}
+
+private enum ConnectionResolution: Sendable {
+    case connected(endpoint: SimDeckEndpoint, simulatorsResponse: SimulatorsResponse)
+    case pairingRequired(SimDeckEndpoint)
+    case failed(String?)
 }
 
 @MainActor
@@ -128,6 +146,7 @@ final class AppModel {
     var chromeProfile: ChromeProfile?
     var chromeImage: UIImage?
     var chromeScreenMask: UIImage?
+    var chromeButtonImages: [String: ChromeButtonImages] = [:]
     var streamDiagnostics = StreamDiagnostics()
     var streamReconnects = 0
     var streamReconnectReason = ""
@@ -326,71 +345,39 @@ final class AppModel {
             }
         }
 
-        var pendingAuthEndpoint: SimDeckEndpoint?
-        var lastError: Error?
-        for candidate in connectionCandidates(for: connectionEndpoint) {
-            do {
-                let api = SimDeckAPI(endpoint: candidate)
-                let (health, requiresPairing) = try await api.healthStatus()
-                if requiresPairing {
-                    var pendingEndpoint = endpointByApplyingHealth(candidate, health)
-                    pendingEndpoint.requiresPairing = true
-                    pendingEndpoint.token = nil
-                    pendingAuthEndpoint = pendingAuthEndpoint.map { mergedEndpoint($0, pendingEndpoint) } ?? pendingEndpoint
-                    discovery.upsert(pendingEndpoint)
-                    lastError = SimDeckAPIError.authRequired
-                    continue
-                }
-                guard let health else {
-                    throw SimDeckAPIError.invalidResponse
-                }
-                var resolvedCandidate = endpointByApplyingHealth(candidate, health)
-                resolvedCandidate.alternateBaseURLs = uniquedURLs(
-                    resolvedCandidate.alternateBaseURLs + alternateURLs(from: health, fallbackPort: normalizedPort(for: resolvedCandidate.baseURL))
-                ).filter { $0 != resolvedCandidate.baseURL }
-                let simulatorsResponse = try await SimDeckAPI(endpoint: resolvedCandidate).simulatorsResponse()
-                let simulators = simulatorsResponse.simulators
-                guard generation == connectionGeneration else { return false }
-                stopStream()
-                self.endpoint = resolvedCandidate
-                self.authEndpoint = nil
-                self.simulators = simulators
-                SpotlightIndexer.indexSimulators(simulators, for: resolvedCandidate)
-                applyServerStatus(simulatorsResponse)
-                selectedSimulatorID = autoStart
-                    ? resolvedCandidate.preferredSimulatorID
-                        ?? simulators.first(where: \.isBooted)?.udid
-                        ?? simulators.first?.udid
-                    : nil
-                if saveEndpoint {
-                    saveUserEndpoint(resolvedCandidate)
-                }
-                saveSelectedEndpoint(resolvedCandidate)
-                status = simulators.isEmpty
-                    ? serverStatusMessage ?? "Connected. No simulators found."
-                    : "Connected."
-                hapticSuccess()
-                if shouldContinuePollingProxy(simulatorsResponse) {
-                    startProxyReadinessPolling(autoStart: autoStart)
-                } else if autoStart, selectedSimulatorID != nil {
-                    await prepareSelectedSimulator()
-                }
-                return true
-            } catch SimDeckAPIError.authRequired {
-                var pendingEndpoint = candidate
-                pendingEndpoint.requiresPairing = true
-                pendingEndpoint.token = nil
-                pendingAuthEndpoint = pendingAuthEndpoint.map { mergedEndpoint($0, pendingEndpoint) } ?? pendingEndpoint
-                discovery.upsert(pendingEndpoint)
-                lastError = SimDeckAPIError.authRequired
-            } catch {
-                lastError = error
-            }
-        }
-
         guard generation == connectionGeneration else { return false }
 
-        if let pendingAuthEndpoint {
+        switch await resolveConnection(for: connectionEndpoint) {
+        case let .connected(resolvedCandidate, simulatorsResponse):
+            guard generation == connectionGeneration else { return false }
+            let simulators = simulatorsResponse.simulators
+            stopStream()
+            self.endpoint = resolvedCandidate
+            self.authEndpoint = nil
+            self.simulators = simulators
+            SpotlightIndexer.indexSimulators(simulators, for: resolvedCandidate)
+            applyServerStatus(simulatorsResponse)
+            selectedSimulatorID = autoStart
+                ? resolvedCandidate.preferredSimulatorID
+                    ?? simulators.first(where: \.isBooted)?.udid
+                    ?? simulators.first?.udid
+                : nil
+            if saveEndpoint {
+                saveUserEndpoint(resolvedCandidate)
+            }
+            saveSelectedEndpoint(resolvedCandidate)
+            status = simulators.isEmpty
+                ? serverStatusMessage ?? "Connected. No simulators found."
+                : "Connected."
+            hapticSuccess()
+            if shouldContinuePollingProxy(simulatorsResponse) {
+                startProxyReadinessPolling(autoStart: autoStart)
+            } else if autoStart, selectedSimulatorID != nil {
+                await prepareSelectedSimulator()
+            }
+            return true
+
+        case let .pairingRequired(pendingAuthEndpoint):
             guard presentPairingOnAuth else {
                 status = "Ready"
                 return false
@@ -399,18 +386,120 @@ final class AppModel {
             hapticWarning()
             presentPairing(for: pendingAuthEndpoint)
             return false
-        }
 
-        if let lastError {
-            status = lastError.localizedDescription
+        case let .failed(message):
+            status = message ?? "Unable to connect."
             hapticWarning()
             return false
         }
 
-        status = "Unable to connect."
-        hapticWarning()
-        return false
+    }
 
+    private func resolveConnection(for endpoint: SimDeckEndpoint) async -> ConnectionResolution {
+        await withTaskGroup(of: ConnectionAttemptResult.self, returning: ConnectionResolution.self) { group in
+            let candidates = connectionCandidates(for: endpoint)
+            for candidate in candidates {
+                group.addTask {
+                    await Self.connectionAttempt(for: candidate)
+                }
+            }
+
+            var pendingAuthEndpoint: SimDeckEndpoint?
+            var lastErrorMessage: String?
+            for await result in group {
+                switch result {
+                case let .connected(candidate, health, simulatorsResponse):
+                    group.cancelAll()
+                    var resolvedCandidate = endpointByApplyingHealth(candidate, health)
+                    resolvedCandidate.alternateBaseURLs = uniquedURLs(
+                        resolvedCandidate.alternateBaseURLs + alternateURLs(
+                            from: health,
+                            fallbackPort: normalizedPort(for: resolvedCandidate.baseURL)
+                        )
+                    )
+                    .filter { $0 != resolvedCandidate.baseURL }
+                    return .connected(endpoint: resolvedCandidate, simulatorsResponse: simulatorsResponse)
+
+                case let .pairingRequired(candidate, health):
+                    var pendingEndpoint = endpointByApplyingHealth(candidate, health)
+                    pendingEndpoint.requiresPairing = true
+                    pendingEndpoint.token = nil
+                    discovery.upsert(pendingEndpoint)
+                    pendingAuthEndpoint = pendingAuthEndpoint.map { mergedEndpoint($0, pendingEndpoint) } ?? pendingEndpoint
+                    lastErrorMessage = SimDeckAPIError.authRequired.localizedDescription
+
+                case let .failed(message):
+                    lastErrorMessage = message
+                }
+            }
+
+            if let pendingAuthEndpoint {
+                return .pairingRequired(pendingAuthEndpoint)
+            }
+            return .failed(lastErrorMessage)
+        }
+    }
+
+    nonisolated private static func connectionAttempt(for candidate: SimDeckEndpoint) async -> ConnectionAttemptResult {
+        do {
+            let api = SimDeckAPI(endpoint: candidate)
+            let (health, requiresPairing) = try await api.healthStatus(timeout: 2.5)
+            if requiresPairing {
+                return .pairingRequired(candidate: candidate, health: health)
+            }
+            guard let health else {
+                throw SimDeckAPIError.invalidResponse
+            }
+            let resolvedCandidate = resolvedEndpointByApplyingHealth(candidate, health)
+            let simulatorsResponse = try await SimDeckAPI(endpoint: resolvedCandidate).simulatorsResponse()
+            return .connected(candidate: candidate, health: health, simulatorsResponse: simulatorsResponse)
+        } catch SimDeckAPIError.authRequired {
+            return .pairingRequired(candidate: candidate, health: nil)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    nonisolated private static func resolvedEndpointByApplyingHealth(_ endpoint: SimDeckEndpoint, _ health: HealthResponse?) -> SimDeckEndpoint {
+        guard let health else { return endpoint }
+        var updated = endpoint
+        updated.serverID = health.serverId ?? updated.serverID
+        updated.hostID = health.hostId ?? updated.hostID
+        updated.hostName = health.hostName ?? updated.hostName
+        updated.serverKind = health.serverKind ?? updated.serverKind
+        if let hostName = updated.hostName?.nilIfBlank {
+            updated.name = hostName
+        }
+        updated.alternateBaseURLs = uniquedURLsForConnection(
+            updated.alternateBaseURLs + alternateURLsForConnection(from: health, fallbackPort: normalizedPortForConnection(updated.baseURL))
+        )
+        .filter { $0 != updated.baseURL }
+        return updated
+    }
+
+    nonisolated private static func uniquedURLsForConnection(_ urls: [URL]) -> [URL] {
+        var seen = Set<URL>()
+        var result: [URL] = []
+        for url in urls.map({ $0.normalizedSimDeckBaseURL() }) where seen.insert(url).inserted {
+            result.append(url)
+        }
+        return result
+    }
+
+    nonisolated private static func alternateURLsForConnection(from health: HealthResponse, fallbackPort: Int) -> [URL] {
+        guard let advertiseHost = health.advertiseHost?.nilIfBlank else { return [] }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = advertiseHost
+        components.port = health.httpPort ?? fallbackPort
+        return components.url.map { [$0] } ?? []
+    }
+
+    nonisolated private static func normalizedPortForConnection(_ url: URL) -> Int {
+        if let port = url.port {
+            return port
+        }
+        return url.scheme?.lowercased() == "https" ? 443 : 80
     }
 
     private func endpointByApplyingHealth(_ endpoint: SimDeckEndpoint, _ health: HealthResponse?) -> SimDeckEndpoint {
@@ -472,15 +561,14 @@ final class AppModel {
     func pair(_ link: SimDeckPairingLink, autoStart: Bool) async -> Bool {
         let candidates = uniquedByBaseURL([link.endpoint] + link.alternateEndpoints)
         if let token = link.endpoint.token?.nilIfBlank {
-            savePairedEndpoints(primary: link.endpoint, alternates: link.alternateEndpoints, token: token)
-            for candidate in candidates {
-                var pairedEndpoint = candidate
-                pairedEndpoint.token = token
-                if await connect(pairedEndpoint, autoStart: autoStart, saveEndpoint: true) {
-                    return true
-                }
-            }
-            return false
+            var pairedEndpoint = link.endpoint
+            pairedEndpoint.token = token
+            pairedEndpoint.alternateBaseURLs = uniquedURLs(
+                pairedEndpoint.alternateBaseURLs + link.alternateEndpoints.flatMap { [$0.baseURL] + $0.alternateBaseURLs }
+            )
+            .filter { $0 != pairedEndpoint.baseURL }
+            savePairedEndpoints(primary: pairedEndpoint, alternates: link.alternateEndpoints, token: token)
+            return await connect(pairedEndpoint, autoStart: autoStart, saveEndpoint: true)
         }
         guard let code = link.pairingCode?.nilIfBlank else {
             var pendingEndpoint = link.endpoint
@@ -1019,6 +1107,16 @@ final class AppModel {
         }
     }
 
+    func toggleSimulatorSoftwareKeyboard() {
+        guard selectedSimulatorID != nil else { return }
+        hapticSelection()
+        let sent = streamClient?.toggleSimulatorSoftwareKeyboard() ?? false
+        guard !sent else { return }
+        Task {
+            await postSoftwareKeyboardButton()
+        }
+    }
+
     @discardableResult
     func sendKey(keyCode: Int, modifiers: Int = 0) -> Bool {
         guard selectedSimulatorID != nil, (0...65_535).contains(keyCode) else { return false }
@@ -1355,6 +1453,24 @@ final class AppModel {
         }
     }
 
+    private func postSoftwareKeyboardButton() async {
+        guard let endpoint, let selectedSimulatorID else { return }
+        do {
+            let payload = HardwareButtonControlPayload(
+                button: "software-keyboard",
+                durationMs: 0,
+                phase: nil,
+                usagePage: nil,
+                usage: nil
+            )
+            let encodedID = selectedSimulatorID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? selectedSimulatorID
+            try await SimDeckAPI(endpoint: endpoint).postControl(payload, path: "/api/simulators/\(encodedID)/button")
+        } catch {
+            status = error.localizedDescription
+            hapticWarning()
+        }
+    }
+
     private func postToggleAppearance() async {
         guard let endpoint, let selectedSimulatorID else { return }
         do {
@@ -1389,6 +1505,7 @@ final class AppModel {
         if !applyCachedChromeAssetsForSelection() {
             chromeProfile = nil
             chromeImage = nil
+            chromeButtonImages = [:]
             chromeScreenMask = nil
         }
         if !applyCachedLastStreamFrameForSelection() {
@@ -1416,7 +1533,8 @@ final class AppModel {
         let loadedProfile = try? await api.chromeProfile(udid: simulatorID)
         let effectiveProfile = loadedProfile ?? cached?.profile
         let assetStamp = effectiveProfile?.assetStamp
-        let loadedImage = try? await api.chromeImage(udid: simulatorID, stamp: assetStamp)
+        let loadedImage = try? await api.chromeImage(udid: simulatorID, stamp: assetStamp, includeButtons: false)
+        let loadedButtonImages = await chromeButtonImages(api: api, simulatorID: simulatorID, profile: effectiveProfile, stamp: assetStamp)
         let loadedScreenMask: UIImage?
         if effectiveProfile?.hasScreenMask == true {
             loadedScreenMask = try? await api.screenMaskImage(udid: simulatorID, stamp: assetStamp)
@@ -1426,7 +1544,8 @@ final class AppModel {
         let loadedAssets = ChromeAssets(
             profile: effectiveProfile,
             image: loadedImage ?? cached?.image,
-            screenMask: effectiveProfile?.hasScreenMask == true ? (loadedScreenMask ?? cached?.screenMask) : nil
+            screenMask: effectiveProfile?.hasScreenMask == true ? (loadedScreenMask ?? cached?.screenMask) : nil,
+            buttonImages: loadedButtonImages.isEmpty ? (cached?.buttonImages ?? [:]) : loadedButtonImages
         )
         guard !loadedAssets.isEmpty else {
             return cached ?? loadedAssets
@@ -1449,6 +1568,34 @@ final class AppModel {
         chromeProfile = assets.profile
         chromeImage = assets.image
         chromeScreenMask = assets.screenMask
+        chromeButtonImages = assets.buttonImages
+    }
+
+    private func chromeButtonImages(
+        api: SimDeckAPI,
+        simulatorID: String,
+        profile: ChromeProfile?,
+        stamp: String?
+    ) async -> [String: ChromeButtonImages] {
+        guard let buttons = profile?.buttons, !buttons.isEmpty else { return [:] }
+        return await withTaskGroup(of: (String, ChromeButtonImages)?.self, returning: [String: ChromeButtonImages].self) { group in
+            for button in buttons {
+                group.addTask {
+                    async let normal = try? api.chromeButtonImage(udid: simulatorID, button: button.name, pressed: false, stamp: stamp)
+                    async let pressed = try? api.chromeButtonImage(udid: simulatorID, button: button.name, pressed: true, stamp: stamp)
+                    let images = await ChromeButtonImages(normal: normal, pressed: pressed)
+                    guard images.normal != nil || images.pressed != nil else { return nil }
+                    return (button.name, images)
+                }
+            }
+            var result: [String: ChromeButtonImages] = [:]
+            for await loaded in group {
+                if let loaded {
+                    result[loaded.0] = loaded.1
+                }
+            }
+            return result
+        }
     }
 
     private func cachedChromeAssets(endpoint: SimDeckEndpoint, simulatorID: String) -> ChromeAssets? {

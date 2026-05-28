@@ -226,6 +226,12 @@ final class WebRTCClient: NSObject {
         return sendJSON(["type": "dismissKeyboard"], allowQueue: false)
     }
 
+    @discardableResult
+    func toggleSimulatorSoftwareKeyboard() -> Bool {
+        markUserActivity()
+        return sendJSON(["type": "toggleSoftwareKeyboard"], allowQueue: false)
+    }
+
     func sendHome() {
         markUserActivity()
         sendJSON(["type": "home"])

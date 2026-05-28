@@ -68,7 +68,6 @@ private struct DevToolsWebViewState: Equatable {
 struct DevToolsPanelView: View {
     @Bindable var model: AppModel
     let close: () -> Void
-    @State private var selectedUDID: String?
     @State private var webKitTargets: [WebKitTarget] = []
     @State private var chromeTargets: [ChromeDevToolsTarget] = []
     @State private var warnings: [String] = []
@@ -80,8 +79,7 @@ struct DevToolsPanelView: View {
     @State private var webViewState = DevToolsWebViewState()
 
     private var selectedSimulator: SimulatorMetadata? {
-        let udid = selectedUDID ?? model.selectedSimulatorID
-        return model.simulators.first { $0.udid == udid }
+        model.selectedSimulator
     }
 
     var body: some View {
@@ -148,22 +146,14 @@ struct DevToolsPanelView: View {
         }
         .presentationDetents([.large])
         .onAppear {
-            selectedUDID = selectedUDID ?? model.selectedSimulatorID ?? model.simulators.first?.udid
-            Task { await loadTargets() }
-        }
-        .onChange(of: selectedUDID) {
-            selectedTarget = nil
             Task { await loadTargets() }
         }
         .onChange(of: model.endpoint?.id) {
             selectedTarget = nil
-            selectedUDID = selectedUDID ?? model.selectedSimulatorID ?? model.simulators.first?.udid
             Task { await loadTargets() }
         }
-        .onChange(of: model.selectedSimulatorID) { _, udid in
-            guard selectedUDID == nil || selectedUDID == udid else { return }
+        .onChange(of: model.selectedSimulatorID) {
             selectedTarget = nil
-            selectedUDID = udid ?? model.simulators.first?.udid
             Task { await loadTargets() }
         }
         .onChange(of: selectedTarget?.id) {
@@ -173,18 +163,6 @@ struct DevToolsPanelView: View {
 
     private var targetList: some View {
         List {
-            Section("Simulator") {
-                if model.simulators.isEmpty {
-                    ContentUnavailableView("No Simulators", systemImage: "iphone")
-                } else {
-                    Picker("Simulator", selection: selectedUdidBinding) {
-                        ForEach(model.simulators) { simulator in
-                            Text(simulator.name).tag(Optional(simulator.udid))
-                        }
-                    }
-                }
-            }
-
             if isLoading {
                 Section {
                     HStack(spacing: 12) {
@@ -232,14 +210,6 @@ struct DevToolsPanelView: View {
             }
         }
         .listStyle(.insetGrouped)
-    }
-
-    private var selectedUdidBinding: Binding<String?> {
-        Binding {
-            selectedUDID
-        } set: { value in
-            selectedUDID = value
-        }
     }
 
     private func targetButton(_ target: DevToolsPanelTarget) -> some View {
@@ -330,6 +300,9 @@ struct DevToolsPanelView: View {
 }
 
 private struct EmbeddedDevToolsWebView: UIViewRepresentable {
+    private static let inspectorPageZoom = 0.86
+    private static let framedInspectorScale = 0.86
+
     let url: URL
     let token: String?
     let wrapsInFrame: Bool
@@ -351,6 +324,7 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.loadState = $loadState
+        webView.pageZoom = wrapsInFrame ? 1 : Self.inspectorPageZoom
         guard context.coordinator.loadedURL != url
             || context.coordinator.reloadID != reloadID
             || context.coordinator.wrapsInFrame != wrapsInFrame else {
@@ -392,14 +366,25 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
 
     private static func wrapperHTML(for url: URL) -> String {
         let urlLiteral = javaScriptLiteral(url.absoluteString)
+        let inverseScale = 1 / framedInspectorScale
         return """
         <!doctype html>
         <html>
         <head>
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
         <style>
-        html, body, iframe { width: 100%; height: 100%; margin: 0; padding: 0; border: 0; background: #111; }
+        html, body { width: 100%; height: 100%; margin: 0; padding: 0; background: #111; }
         body { overflow: hidden; }
+        iframe {
+            width: \(inverseScale * 100)%;
+            height: \(inverseScale * 100)%;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            background: #111;
+            transform: scale(\(framedInspectorScale));
+            transform-origin: top left;
+        }
         </style>
         </head>
         <body>

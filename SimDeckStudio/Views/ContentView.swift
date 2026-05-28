@@ -4,11 +4,12 @@ import UIKit
 
 struct ContentView: View {
     @Bindable var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var searchText = ""
     @State private var searchExpanded = false
     @State private var devToolsDrawerPresented = false
-    @GestureState private var devToolsDrawerDrag: CGFloat = 0
+    @State private var devToolsDrawerTranslation: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .trailing) {
@@ -23,7 +24,9 @@ struct ContentView: View {
     private var devToolsDrawerLayer: some View {
         GeometryReader { proxy in
             let drawerWidth = devToolsDrawerWidth(for: proxy.size)
-            let progress = devToolsDrawerProgress(width: drawerWidth)
+            let offset = devToolsDrawerOffset(width: drawerWidth)
+            let progress = devToolsDrawerProgress(width: drawerWidth, offset: offset)
+            let shadowColor = devToolsDrawerShadowColor(progress: progress)
             ZStack(alignment: .trailing) {
                 if progress > 0.01 {
                     Color.black
@@ -42,8 +45,13 @@ struct ContentView: View {
                 .frame(maxHeight: .infinity)
                 .background(.regularMaterial)
                 .clipShape(.rect(cornerRadius: usesCompactRootNavigation ? 0 : 18))
-                .shadow(color: .black.opacity(0.24 * progress), radius: 28, x: -8, y: 0)
-                .offset(x: drawerWidth * (1 - progress))
+                .shadow(color: shadowColor, radius: colorScheme == .dark ? 36 : 28, x: -10, y: 0)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.white.opacity(colorScheme == .dark ? 0.10 * progress : 0))
+                        .frame(width: 1)
+                }
+                .offset(x: offset)
                 .simultaneousGesture(devToolsDrawerGesture(width: drawerWidth))
                 .allowsHitTesting(progress > 0.01)
                 .ignoresSafeArea()
@@ -58,7 +66,6 @@ struct ContentView: View {
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .trailing)
-            .animation(.snappy(duration: 0.24), value: devToolsDrawerPresented)
         }
     }
 
@@ -69,45 +76,72 @@ struct ContentView: View {
         return min(max(420, size.width * 0.42), 560)
     }
 
-    private func devToolsDrawerProgress(width: CGFloat) -> CGFloat {
-        let base = devToolsDrawerPresented ? 1.0 : 0.0
-        let dragDelta = -devToolsDrawerDrag / max(width, 1)
-        return min(1, max(0, base + dragDelta))
+    private func devToolsDrawerOffset(width: CGFloat, projectedTranslation: CGFloat? = nil) -> CGFloat {
+        let restingOffset = devToolsDrawerPresented ? 0.0 : width
+        let translation = projectedTranslation ?? devToolsDrawerTranslation
+        return min(width, max(0, restingOffset + translation))
+    }
+
+    private func devToolsDrawerProgress(width: CGFloat, offset: CGFloat) -> CGFloat {
+        1 - min(1, max(0, offset / max(width, 1)))
+    }
+
+    private func devToolsDrawerShadowColor(progress: CGFloat) -> Color {
+        if colorScheme == .dark {
+            return .white.opacity(0.30 * progress)
+        }
+        return .black.opacity(0.24 * progress)
     }
 
     private func devToolsDrawerGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 8, coordinateSpace: .global)
-            .updating($devToolsDrawerDrag) { value, state, _ in
+            .onChanged { value in
                 guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                state = value.translation.width
+                var transaction = Transaction()
+                transaction.animation = nil
+                withTransaction(transaction) {
+                    devToolsDrawerTranslation = normalizedDevToolsDrawerTranslation(value.translation.width)
+                }
             }
             .onEnded { value in
                 guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                let projected = value.predictedEndTranslation.width
-                if devToolsDrawerPresented {
-                    if value.translation.width > width * 0.18 || projected > width * 0.24 {
-                        closeDevToolsDrawer()
-                    } else {
-                        openDevToolsDrawer()
-                    }
-                } else if value.translation.width < -width * 0.12 || projected < -width * 0.18 {
-                    openDevToolsDrawer()
-                }
+                let projectedTranslation = normalizedDevToolsDrawerTranslation(value.predictedEndTranslation.width)
+                let projectedOffset = devToolsDrawerOffset(width: width, projectedTranslation: projectedTranslation)
+                setDevToolsDrawerPresented(projectedOffset < width * 0.5)
             }
     }
 
-    private func openDevToolsDrawer() {
-        model.hapticSelection()
-        withAnimation(.snappy(duration: 0.24)) {
-            devToolsDrawerPresented = true
+    private func normalizedDevToolsDrawerTranslation(_ translation: CGFloat) -> CGFloat {
+        if devToolsDrawerPresented {
+            return max(0, translation)
+        }
+        return min(0, translation)
+    }
+
+    private func setDevToolsDrawerPresented(_ presented: Bool) {
+        let changed = devToolsDrawerPresented != presented
+        if changed {
+            model.hapticSelection()
+        }
+        withAnimation(.snappy(duration: 0.22)) {
+            devToolsDrawerPresented = presented
+            devToolsDrawerTranslation = 0
         }
     }
 
-    private func closeDevToolsDrawer() {
-        model.hapticSelection()
-        withAnimation(.snappy(duration: 0.22)) {
-            devToolsDrawerPresented = false
+    private func toggleDevToolsDrawerPresented(_ presented: Bool) {
+        if devToolsDrawerPresented == presented, devToolsDrawerTranslation == 0 {
+            return
         }
+        setDevToolsDrawerPresented(presented)
+    }
+
+    private func openDevToolsDrawer() {
+        toggleDevToolsDrawerPresented(true)
+    }
+
+    private func closeDevToolsDrawer() {
+        toggleDevToolsDrawerPresented(false)
     }
 
     @ViewBuilder
@@ -125,7 +159,7 @@ struct ContentView: View {
                 )
                 .navigationDestination(isPresented: compactStreamPresented) {
                     if showsStreamDetail {
-                        SimulatorStreamView(model: model)
+                        SimulatorStreamView(model: model, openDevTools: openDevToolsDrawer)
                     } else {
                         Color.clear
                     }
@@ -166,7 +200,7 @@ struct ContentView: View {
             )
         } detail: {
             if showsStreamDetail {
-                SimulatorStreamView(model: model)
+                SimulatorStreamView(model: model, openDevTools: openDevToolsDrawer)
             } else {
                 Color.clear
             }

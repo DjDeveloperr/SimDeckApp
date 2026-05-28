@@ -3,6 +3,8 @@ import UIKit
 
 struct SimulatorStreamView: View {
     @Bindable var model: AppModel
+    var openDevTools: (() -> Void)?
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @State private var touchIndicators: [StreamTouchIndicator] = []
     @State private var touchOverlayRemovalTask: Task<Void, Never>?
@@ -26,6 +28,17 @@ struct SimulatorStreamView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 streamSettingsMenu
+            }
+            if usesPersistentDevToolsToolbarButton {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        model.hapticSelection()
+                        openDevTools?()
+                    } label: {
+                        Label("DevTools", systemImage: "sidebar.right")
+                    }
+                    .disabled(openDevTools == nil)
+                }
             }
         }
         .sheet(item: $presentedSheet) { sheet in
@@ -182,6 +195,16 @@ struct SimulatorStreamView: View {
                 }
             }
             Section("Interaction") {
+                if usesDevToolsMenuItem {
+                    Button {
+                        model.hapticSelection()
+                        openDevTools?()
+                    } label: {
+                        Label("Open DevTools", systemImage: "sidebar.right")
+                    }
+                    .disabled(openDevTools == nil)
+                }
+
                 Toggle(isOn: Binding(
                     get: { model.touchOverlayVisible },
                     set: { model.setTouchOverlayVisible($0) }
@@ -198,6 +221,14 @@ struct SimulatorStreamView: View {
         } label: {
             Label("Stream Settings", systemImage: "gearshape")
         }
+    }
+
+    private var usesPersistentDevToolsToolbarButton: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass != .compact
+    }
+
+    private var usesDevToolsMenuItem: Bool {
+        !usesPersistentDevToolsToolbarButton
     }
 
     private func usesSideControls(in size: CGSize) -> Bool {
@@ -262,6 +293,17 @@ struct SimulatorStreamView: View {
                     .opacity(model.hasCurrentStreamFrame ? 1 : 0)
                 }
 
+                if model.selectedSimulator?.isBooted == true,
+                   let chromeProfile = model.chromeProfile,
+                   layout.usesChrome {
+                    HardwareButtonLayer(
+                        model: model,
+                        chromeProfile: chromeProfile,
+                        buttonImages: model.chromeButtonImages,
+                        layout: layout
+                    )
+                }
+
                 if let chromeImage = model.chromeImage, layout.usesChrome {
                     Image(uiImage: chromeImage)
                         .resizable()
@@ -272,18 +314,11 @@ struct SimulatorStreamView: View {
                         .allowsHitTesting(false)
                 }
 
-                if model.selectedSimulator?.isBooted == true,
-                   let chromeProfile = model.chromeProfile,
-                   layout.usesChrome {
-                    HardwareButtonLayer(model: model, chromeProfile: chromeProfile, layout: layout)
-                }
-
                 if model.selectedSimulator?.isBooted == true {
-                    StreamTouchInputLayer { event in
+                    StreamTouchInputLayer(screenFrame: layout.screenFrame) { event in
                         handleTouchEvent(event)
                     }
-                    .frame(width: layout.screenFrame.width, height: layout.screenFrame.height)
-                    .position(x: layout.screenFrame.midX, y: layout.screenFrame.midY)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
 
                 }
 
@@ -527,8 +562,10 @@ struct StreamTouchInputDebugHarness: View {
         ZStack(alignment: .topLeading) {
             Color.black.ignoresSafeArea()
 
-            StreamTouchInputLayer { event in
-                handle(event)
+            GeometryReader { proxy in
+                StreamTouchInputLayer(screenFrame: CGRect(origin: .zero, size: proxy.size)) { event in
+                    handle(event)
+                }
             }
             .ignoresSafeArea()
 
@@ -610,21 +647,25 @@ private extension StreamTouchEventKind {
 #endif
 
 private struct StreamTouchInputLayer: UIViewRepresentable {
+    let screenFrame: CGRect
     let onEvent: (StreamTouchEvent) -> Void
 
     func makeUIView(context: Context) -> StreamTouchInputView {
         let view = StreamTouchInputView()
+        view.screenFrame = screenFrame
         view.onEvent = onEvent
         return view
     }
 
     func updateUIView(_ view: StreamTouchInputView, context: Context) {
+        view.screenFrame = screenFrame
         view.onEvent = onEvent
     }
 }
 
 private final class StreamTouchInputView: UIView {
     var onEvent: ((StreamTouchEvent) -> Void)?
+    var screenFrame: CGRect = .zero
 
     private enum ActiveGesture {
         case single(kind: StreamTouchEventKind, touch: UITouch)
@@ -683,6 +724,13 @@ private final class StreamTouchInputView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         finishTouches(touches, phase: "cancelled")
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        screenFrame.contains(point)
+            || pendingSingleTouch != nil
+            || activeGesture != nil
+            || !activeTouches.isEmpty
     }
 
     private func addTouches(_ touches: Set<UITouch>) {
@@ -910,14 +958,11 @@ private final class StreamTouchInputView: UIView {
     }
 
     private func containsStartingPoint(_ touch: UITouch) -> Bool {
-        guard bounds.width > 0, bounds.height > 0 else {
+        guard screenFrame.width > 0, screenFrame.height > 0 else {
             return false
         }
         let location = touch.location(in: self)
-        return location.x >= 0
-            && location.x <= bounds.width
-            && location.y >= 0
-            && location.y <= bounds.height
+        return screenFrame.contains(location)
     }
 
     private func removeTouches(_ touches: Set<UITouch>) {
@@ -930,22 +975,26 @@ private final class StreamTouchInputView: UIView {
     }
 
     private func touchPoint(for touch: UITouch) -> StreamTouchPoint? {
-        guard bounds.width > 0,
-              bounds.height > 0,
+        guard screenFrame.width > 0,
+              screenFrame.height > 0,
               let id = touchIDs[ObjectIdentifier(touch)] else {
             return nil
         }
         let location = touch.location(in: self)
+        let clamped = CGPoint(
+            x: min(max(location.x, screenFrame.minX), screenFrame.maxX),
+            y: min(max(location.y, screenFrame.minY), screenFrame.maxY)
+        )
         let local = CGPoint(
-            x: min(max(location.x, 0), bounds.width),
-            y: min(max(location.y, 0), bounds.height)
+            x: clamped.x - screenFrame.minX,
+            y: clamped.y - screenFrame.minY
         )
         return StreamTouchPoint(
             id: id,
             local: local,
             normalized: CGPoint(
-                x: min(max(local.x / bounds.width, 0), 1),
-                y: min(max(local.y / bounds.height, 0), 1)
+                x: min(max(local.x / screenFrame.width, 0), 1),
+                y: min(max(local.y / screenFrame.height, 0), 1)
             )
         )
     }
@@ -1458,7 +1507,7 @@ private struct StreamControlButtons: View {
 
         Spacer(minLength: 4)
 
-        StreamHardwareControlButton("Lock", systemImage: "lock", buttonName: "power", model: model)
+        StreamSoftwareKeyboardControlButton(model: model)
 
         StreamKeyboardControlButton(model: model, isActive: $keyboardCaptureActive)
     }
@@ -1784,14 +1833,29 @@ private struct StreamKeyboardControlButton: View {
                 model.dismissSimulatorKeyboard()
             }
         } label: {
-            StreamControlIconLabel(title: "Keyboard", systemImage: "keyboard")
+            StreamControlIconLabel(title: "Text Input", systemImage: "text.cursor")
                 .opacity(isActive ? 1 : 0.86)
                 .scaleEffect(isActive ? 1.04 : 1)
         }
         .buttonStyle(.plain)
         .buttonBorderShape(.circle)
-        .accessibilityLabel("Keyboard")
+        .accessibilityLabel("Text Input")
         .accessibilityValue(isActive ? "Active" : "Inactive")
+    }
+}
+
+private struct StreamSoftwareKeyboardControlButton: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Button {
+            model.toggleSimulatorSoftwareKeyboard()
+        } label: {
+            StreamControlIconLabel(title: "Keyboard", systemImage: "keyboard")
+        }
+        .buttonStyle(.plain)
+        .buttonBorderShape(.circle)
+        .accessibilityLabel("Keyboard")
     }
 }
 
@@ -1820,6 +1884,7 @@ private struct StreamControlIconLabel: View {
 private struct HardwareButtonLayer: View {
     @Bindable var model: AppModel
     let chromeProfile: ChromeProfile
+    let buttonImages: [String: ChromeButtonImages]
     let layout: DeviceViewportLayout
 
     var body: some View {
@@ -1828,6 +1893,7 @@ private struct HardwareButtonLayer: View {
                 HardwareButtonHitArea(
                     model: model,
                     button: button,
+                    images: buttonImages[button.name],
                     buttonName: buttonName,
                     frame: layout.chromeButtonFrame(button)
                 )
@@ -1839,6 +1905,7 @@ private struct HardwareButtonLayer: View {
 private struct HardwareButtonHitArea: View {
     @Bindable var model: AppModel
     let button: ChromeButtonProfile
+    let images: ChromeButtonImages?
     let buttonName: String
     let frame: CGRect
     @State private var isPressed = false
@@ -1847,11 +1914,22 @@ private struct HardwareButtonHitArea: View {
     @State private var totalCrownDragDistance: CGFloat = 0
 
     var body: some View {
-        Color.clear
+        ZStack {
+            if let image = activeImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: frame.width, height: frame.height)
+                    .allowsHitTesting(false)
+            }
+            Color.clear
+        }
             .frame(width: hitFrame.width, height: hitFrame.height)
             .contentShape(Rectangle())
+            .offset(motionOffset)
             .position(x: hitFrame.midX, y: hitFrame.midY)
             .gesture(hitGesture)
+            .animation(.snappy(duration: isPressed ? 0.09 : 0.18), value: isPressed)
             .onDisappear {
                 if isDigitalCrown {
                     resetCrownDrag()
@@ -1864,6 +1942,20 @@ private struct HardwareButtonHitArea: View {
             .accessibilityAction {
                 model.tapHardwareButton(named: buttonName, usagePage: button.usagePage, usage: button.usage)
             }
+    }
+
+    private var activeImage: UIImage? {
+        isPressed ? (images?.pressed ?? images?.normal) : images?.normal
+    }
+
+    private var motionOffset: CGSize {
+        let normal = button.normalOffset ?? ChromeButtonOffset(x: 0, y: 0)
+        let rollover = button.rolloverOffset ?? normal
+        let scale = button.width > 0 ? frame.width / CGFloat(button.width) : 1
+        let inwardX = CGFloat(normal.x - rollover.x) * scale
+        let inwardY = CGFloat(normal.y - rollover.y) * scale
+        let ratio = isPressed ? 0.85 : 0.5
+        return CGSize(width: inwardX * ratio, height: inwardY * ratio)
     }
 
     private var hitFrame: CGRect {
