@@ -14,10 +14,16 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .trailing) {
             navigationContent(usesSearchAccessory: true)
-            devToolsDrawerLayer
+            if showsStreamDetail {
+                devToolsDrawerLayer
+            }
         }
         .task {
             model.start()
+        }
+        .onChange(of: showsStreamDetail) { _, isShowingStream in
+            guard !isShowingStream else { return }
+            closeDevToolsDrawerWithoutHaptics()
         }
     }
 
@@ -32,9 +38,11 @@ struct ContentView: View {
                     Color.black
                         .opacity(0.22 * progress)
                         .ignoresSafeArea()
+                        .contentShape(Rectangle())
                         .onTapGesture {
                             closeDevToolsDrawer()
                         }
+                        .gesture(devToolsDrawerGesture(width: drawerWidth))
                         .transition(.opacity)
                 }
 
@@ -137,11 +145,22 @@ struct ContentView: View {
     }
 
     private func openDevToolsDrawer() {
+        guard showsStreamDetail else { return }
         toggleDevToolsDrawerPresented(true)
     }
 
     private func closeDevToolsDrawer() {
         toggleDevToolsDrawerPresented(false)
+    }
+
+    private func closeDevToolsDrawerWithoutHaptics() {
+        guard devToolsDrawerPresented || devToolsDrawerTranslation != 0 else { return }
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            devToolsDrawerPresented = false
+            devToolsDrawerTranslation = 0
+        }
     }
 
     @ViewBuilder
