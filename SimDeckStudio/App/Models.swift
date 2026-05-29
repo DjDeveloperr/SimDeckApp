@@ -43,11 +43,12 @@ struct SimDeckEndpoint: Identifiable, Hashable, Codable, Sendable {
     var serverID: String?
     var hostID: String?
     var hostName: String?
+    var customName: String?
     var serverKind: String?
     var alternateBaseURLs: [URL]
 
     var displayName: String {
-        hostName?.nilIfBlank ?? name
+        customName?.nilIfBlank ?? hostName?.nilIfBlank ?? name
     }
 
     var listSubtitle: String {
@@ -256,6 +257,19 @@ struct SimulatorMetadata: Identifiable, Hashable, Decodable, Sendable {
             return "rectangle.portrait"
         }
         return "iphone.gen3"
+    }
+
+    var isIPhone: Bool {
+        let metadata = [platform, runtimeIdentifier, runtimeName, deviceTypeIdentifier, deviceTypeName, name]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: " ")
+        if metadata.contains("ipad") || metadata.contains("apple-tv") || metadata.contains("apple tv")
+            || metadata.contains("tvos") || metadata.contains("apple-watch") || metadata.contains("apple watch")
+            || metadata.contains("watchos") || metadata.contains("vision") || metadata.contains("xros")
+            || metadata.contains("macbook") || metadata.contains("imac") || metadata.contains("android") {
+            return false
+        }
+        return metadata.contains("iphone") || metadata.contains("ios")
     }
 }
 
@@ -746,12 +760,62 @@ struct WebRTCOfferPayload: Encodable, Sendable {
 enum AppRoute: Hashable, Sendable {
     case endpoint(SimDeckEndpoint, autoStart: Bool)
     case pairing(SimDeckPairingLink, autoStart: Bool)
+    case ciSession(CIProxySession, autoStart: Bool)
 }
 
 struct SimDeckPairingLink: Hashable, Sendable {
     let endpoint: SimDeckEndpoint
     let pairingCode: String?
     let alternateEndpoints: [SimDeckEndpoint]
+}
+
+enum AppPresentationRequest: Hashable, Sendable {
+    case pair
+    case scanPairingQR
+    case ciSessionPassword
+}
+
+struct CIProxyTokenCipher: Hashable, Codable, Sendable {
+    let algorithm: String
+    let ciphertext: String
+    let iv: String
+    let salt: String
+}
+
+struct CIProxySession: Hashable, Sendable {
+    let upstream: URL
+    let token: String?
+    let tokenCipher: CIProxyTokenCipher?
+    let device: String?
+    let platform: String?
+    let repo: String?
+    let pr: String?
+    let runID: String?
+    let expiresAt: String?
+
+    var requiresPassword: Bool {
+        token?.nilIfBlank == nil && tokenCipher != nil
+    }
+
+    var displayName: String {
+        if let repo = repo?.nilIfBlank {
+            return pr?.nilIfBlank.map { "\(repo) #\($0)" } ?? repo
+        }
+        return "SimDeck CI"
+    }
+
+    func endpoint(token overrideToken: String? = nil) -> SimDeckEndpoint {
+        SimDeckEndpoint(
+            name: displayName,
+            baseURL: upstream,
+            source: .studioLink,
+            token: overrideToken?.nilIfBlank ?? token?.nilIfBlank,
+            preferredSimulatorID: device?.nilIfBlank,
+            serverID: runID?.nilIfBlank.map { "github-actions-\($0)" },
+            hostName: displayName,
+            serverKind: "githubActions"
+        )
+    }
 }
 
 extension URL {
@@ -765,6 +829,18 @@ extension URL {
             components.path = components.path.trimmingTrailingSlashes()
         }
         return components.url ?? self
+    }
+}
+
+extension String {
+    var base64URLDecodedData: Data? {
+        var value = replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = value.count % 4
+        if remainder > 0 {
+            value.append(String(repeating: "=", count: 4 - remainder))
+        }
+        return Data(base64Encoded: value)
     }
 }
 

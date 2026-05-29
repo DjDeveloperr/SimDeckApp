@@ -1,6 +1,28 @@
 import SwiftUI
 import UIKit
 
+private enum FullscreenCorner: CaseIterable {
+    case topLeading, topTrailing, bottomLeading, bottomTrailing
+
+    func position(in rect: CGRect) -> CGPoint {
+        switch self {
+        case .topLeading: return CGPoint(x: rect.minX, y: rect.minY)
+        case .topTrailing: return CGPoint(x: rect.maxX, y: rect.minY)
+        case .bottomLeading: return CGPoint(x: rect.minX, y: rect.maxY)
+        case .bottomTrailing: return CGPoint(x: rect.maxX, y: rect.maxY)
+        }
+    }
+
+    var directionVector: CGVector {
+        switch self {
+        case .topLeading: return CGVector(dx: -1, dy: -1)
+        case .topTrailing: return CGVector(dx: 1, dy: -1)
+        case .bottomLeading: return CGVector(dx: -1, dy: 1)
+        case .bottomTrailing: return CGVector(dx: 1, dy: 1)
+        }
+    }
+}
+
 struct SimulatorStreamView: View {
     @Bindable var model: AppModel
     var openDevTools: (() -> Void)?
@@ -11,6 +33,9 @@ struct SimulatorStreamView: View {
     @State private var presentedSheet: StreamSheet?
     @State private var keyboardCaptureActive = false
     @State private var keyboardHeight: CGFloat = 0
+    @State private var fullscreenProgress: CGFloat = 0
+    @State private var fullscreenDragBase: CGFloat = 0
+    @State private var fullscreenDragActive = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -18,7 +43,10 @@ struct SimulatorStreamView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(fullscreenProgress > 0.5 ? .hidden : .visible, for: .navigationBar)
+        .statusBarHidden(fullscreenProgress > 0.5)
         .background(NavigationPopGestureGate())
+        .animation(.snappy(duration: 0.28), value: fullscreenProgress > 0.5)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 StreamTitleButton(model: model) {
@@ -94,14 +122,16 @@ struct SimulatorStreamView: View {
             .accessibilityHidden(true)
         }
         .safeAreaInset(edge: .bottom) {
-            if model.selectedSimulator != nil, !usesSideControls {
+            if model.selectedSimulator != nil, !usesSideControls, fullscreenProgress <= 0.5 {
                 StreamControlBar(
                     model: model,
                     keyboardCaptureActive: $keyboardCaptureActive,
                     placement: .bottom
                 )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .animation(.snappy(duration: 0.28), value: fullscreenProgress > 0.5)
         .safeAreaInset(edge: .leading, spacing: 0) {
             if model.selectedSimulator != nil, usesSideControls {
                 StreamControlBar(
@@ -314,6 +344,10 @@ struct SimulatorStreamView: View {
                         .allowsHitTesting(false)
                 }
 
+                if fullscreenGestureEnabled, layout.usesChrome {
+                    fullscreenCornerHandles(layout: layout, viewportSize: proxy.size)
+                }
+
                 if model.selectedSimulator?.isBooted == true {
                     StreamTouchInputLayer(screenFrame: layout.screenFrame) { event in
                         handleTouchEvent(event)
@@ -356,11 +390,67 @@ struct SimulatorStreamView: View {
                         .transition(.opacity)
                 }
             }
+            .scaleEffect(
+                fullscreenScale(layout: layout, viewportSize: proxy.size),
+                anchor: fullscreenAnchor(layout: layout, viewportSize: proxy.size)
+            )
             .contentShape(Rectangle())
             .animation(.snappy(duration: 0.3), value: keyboardCaptureActive)
             .animation(.smooth(duration: 0.28), value: keyboardHeight)
+            .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.88, blendDuration: 0), value: fullscreenProgress)
         }
         .background(streamBackground)
+    }
+
+    private var fullscreenGestureEnabled: Bool {
+        UIDevice.current.userInterfaceIdiom == .phone && (model.selectedSimulator?.isIPhone ?? false)
+    }
+
+    private func fullscreenScale(layout: DeviceViewportLayout, viewportSize: CGSize) -> CGFloat {
+        guard fullscreenGestureEnabled, layout.screenFrame.width > 0, layout.screenFrame.height > 0 else { return 1 }
+        let fitScale = min(viewportSize.width / layout.screenFrame.width, viewportSize.height / layout.screenFrame.height)
+        let targetScale = max(1, fitScale * 0.9)
+        return 1 + (targetScale - 1) * fullscreenProgress
+    }
+
+    private func fullscreenAnchor(layout: DeviceViewportLayout, viewportSize: CGSize) -> UnitPoint {
+        guard viewportSize.width > 0, viewportSize.height > 0 else { return .center }
+        return UnitPoint(
+            x: layout.screenFrame.midX / viewportSize.width,
+            y: layout.screenFrame.midY / viewportSize.height
+        )
+    }
+
+    @ViewBuilder
+    private func fullscreenCornerHandles(layout: DeviceViewportLayout, viewportSize: CGSize) -> some View {
+        let handleSize: CGFloat = 160
+        ForEach(FullscreenCorner.allCases, id: \.self) { corner in
+            let center = corner.position(in: layout.shellFrame)
+            Color.clear
+                .frame(width: handleSize, height: handleSize)
+                .contentShape(Rectangle())
+                .position(x: center.x, y: center.y)
+                .gesture(fullscreenGesture(for: corner, viewportSize: viewportSize))
+        }
+    }
+
+    private func fullscreenGesture(for corner: FullscreenCorner, viewportSize: CGSize) -> some Gesture {
+        let threshold = max(120, min(viewportSize.width, viewportSize.height) * 0.32)
+        return DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                if !fullscreenDragActive {
+                    fullscreenDragActive = true
+                    fullscreenDragBase = fullscreenProgress
+                }
+                let dir = corner.directionVector
+                let projection = (value.translation.width * dir.dx + value.translation.height * dir.dy)
+                let delta = projection / (threshold * sqrt(2))
+                fullscreenProgress = max(0, min(1, fullscreenDragBase + delta))
+            }
+            .onEnded { _ in
+                fullscreenDragActive = false
+                fullscreenProgress = fullscreenProgress > 0.5 ? 1 : 0
+            }
     }
 
     private var streamBackground: Color {
@@ -682,7 +772,6 @@ private final class StreamTouchInputView: UIView {
     private var pendingSingleKind: StreamTouchEventKind?
     private var pendingSingleSamples: [(phase: String, point: StreamTouchPoint)] = []
     private var suppressSingleUntilAllTouchesEnd = false
-    private let singleTouchDeferral: TimeInterval = 0.16
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -822,20 +911,7 @@ private final class StreamTouchInputView: UIView {
             )
         )
 
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self,
-                  let pendingSingleTouch = self.pendingSingleTouch,
-                  pendingSingleTouch === touch,
-                  self.activeGesture == nil,
-                  !self.suppressSingleUntilAllTouchesEnd,
-                  self.activeTouches.contains(where: { $0 === touch }) else {
-                return
-            }
-
-            self.activatePendingSingleTouch()
-        }
-        pendingSingleWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + singleTouchDeferral, execute: workItem)
+        activatePendingSingleTouch()
     }
 
     private func appendPendingSingleMoveIfNeeded(for touches: Set<UITouch>) -> Bool {

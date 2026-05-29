@@ -116,6 +116,11 @@ private enum ConnectionResolution: Sendable {
     case failed(String?)
 }
 
+private enum CISessionUnlockError: Error {
+    case invalidCipher
+    case invalidPlaintext
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -126,6 +131,8 @@ final class AppModel {
     private static let streamConfigKey = "streamConfig"
     private static let hapticsEnabledKey = "hapticsEnabled"
     private static let touchOverlayVisibleKey = "touchOverlayVisible"
+    private static let telemetryEnabledKey = "telemetryEnabled"
+    private static let didRequestReviewKey = "didRequestReview"
     private static let chromeCacheDirectoryName = "ChromeAssets"
     private static let lastFrameCacheDirectoryName = "LastStreamFrames"
 
@@ -166,6 +173,16 @@ final class AppModel {
             UserDefaults.standard.set(touchOverlayVisible, forKey: Self.touchOverlayVisibleKey)
         }
     }
+    var telemetryEnabled = AppModel.loadTelemetryEnabled() {
+        didSet {
+            Metrics.setEnabled(telemetryEnabled)
+        }
+    }
+    var presentationRequest: AppPresentationRequest?
+    var pendingCISession: CIProxySession?
+    var reviewRequestPending = false
+    var pairingSheetPresented = false
+    var pairingScannerPresented = false
 
     @ObservationIgnored private var streamClient: WebRTCClient?
     @ObservationIgnored private var hasAutoConnected = false
@@ -179,6 +196,8 @@ final class AppModel {
     @ObservationIgnored private var chromeCacheOrder: [String] = []
     @ObservationIgnored private var lastStreamFrameKey: String?
     @ObservationIgnored private var lastSimulatorRefreshAt = Date.distantPast
+    @ObservationIgnored private var shortcutObserver: NSObjectProtocol?
+    @ObservationIgnored private var sustainedConnectionTask: Task<Void, Never>?
     private static let chromeCacheLimit = 24
 
     init() {
@@ -186,6 +205,21 @@ final class AppModel {
             Task { @MainActor in
                 await self?.autoConnectIfNeeded(endpoint)
             }
+        }
+        shortcutObserver = NotificationCenter.default.addObserver(
+            forName: .simDeckShortcutActionRequested,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.consumePendingShortcutAction()
+            }
+        }
+    }
+
+    deinit {
+        if let shortcutObserver {
+            NotificationCenter.default.removeObserver(shortcutObserver)
         }
     }
 
@@ -241,6 +275,8 @@ final class AppModel {
     }
 
     func start() {
+        Metrics.track(.appLaunched)
+        consumePendingShortcutAction()
         loadSavedEndpoints()
         SpotlightIndexer.indexServers(savedEndpoints)
         if let lastSelectedEndpoint = loadSelectedEndpoint() {
@@ -277,6 +313,9 @@ final class AppModel {
         if handleSpotlightURL(url) {
             return
         }
+        if handleAppActionURL(url) {
+            return
+        }
         guard let route = StudioLinkResolver.route(for: url) else {
             status = "Unsupported link."
             return
@@ -288,16 +327,148 @@ final class AppModel {
             Task { await connect(endpoint, autoStart: autoStart, saveEndpoint: true) }
         case let .pairing(link, autoStart):
             Task { await pair(link, autoStart: autoStart) }
+        case let .ciSession(session, autoStart):
+            handle(ciSession: session, autoStart: autoStart)
         }
     }
 
     func handle(userActivity: NSUserActivity) {
-        guard userActivity.activityType == CSSearchableItemActionType,
-              let identifier = userActivity.userInfo?[CSSearchableItemActivityIdentifier] as? String,
-              let url = URL(string: identifier) else {
+        if userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+           let url = userActivity.webpageURL {
+            handle(url: url)
             return
         }
-        handle(url: url)
+        if userActivity.activityType == CSSearchableItemActionType,
+           let identifier = userActivity.userInfo?[CSSearchableItemActivityIdentifier] as? String,
+           let url = URL(string: identifier) {
+            handle(url: url)
+        }
+    }
+
+    func consumePresentationRequest() {
+        presentationRequest = nil
+    }
+
+    func openPairingSheet() {
+        pairingScannerPresented = false
+        pairingSheetPresented = true
+    }
+
+    func openPairingScanner() {
+        pairingSheetPresented = false
+        pairingScannerPresented = true
+    }
+
+    @discardableResult
+    func unlockPendingCISession(password: String) async -> Bool {
+        guard let session = pendingCISession,
+              let cipher = session.tokenCipher else {
+            status = "No CI session is waiting for a password."
+            hapticWarning()
+            return false
+        }
+        do {
+            let token = try Self.decryptCISessionToken(cipher, password: password)
+            pendingCISession = nil
+            hapticSuccess()
+            return await connect(session.endpoint(token: token), autoStart: session.device?.nilIfBlank != nil, saveEndpoint: true)
+        } catch {
+            status = "That password did not unlock this CI session."
+            hapticWarning()
+            return false
+        }
+    }
+
+    private func handle(ciSession: CIProxySession, autoStart: Bool) {
+        if ciSession.requiresPassword {
+            pendingCISession = ciSession
+            status = "Enter the SimDeck CI session password."
+            hapticSelection()
+            requestPresentation(.ciSessionPassword)
+            return
+        }
+        guard ciSession.token?.nilIfBlank != nil else {
+            status = "This CI link is missing its SimDeck access token."
+            hapticWarning()
+            return
+        }
+        Task {
+            await connect(ciSession.endpoint(), autoStart: autoStart, saveEndpoint: true)
+        }
+    }
+
+    private func handleAppActionURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "simdeck" else { return false }
+        let action = url.host(percentEncoded: false)?.lowercased()
+        switch action {
+        case "pair", "pairing":
+            guard !urlHasEndpointParameters(url) else { return false }
+            if let code = queryValue("code", in: url) ?? queryValue("pairingCode", in: url) ?? queryValue("c", in: url) {
+                pairingCode = code
+            }
+            openPairingSheet()
+            return true
+        case "scan", "scan-qr", "qr":
+            openPairingScanner()
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func requestPresentation(_ request: AppPresentationRequest) {
+        presentationRequest = request
+    }
+
+    private func consumePendingShortcutAction() {
+        guard let action = SimDeckShortcutActionStore.consumePendingAction() else { return }
+        switch action {
+        case .pair:
+            openPairingSheet()
+        case .scanPairingQR:
+            openPairingScanner()
+        }
+    }
+
+    private func urlHasEndpointParameters(_ url: URL) -> Bool {
+        queryValue("url", in: url) != nil
+            || queryValue("u", in: url) != nil
+            || queryValue("host", in: url) != nil
+    }
+
+    private func queryValue(_ name: String, in url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first { $0.name == name }?
+            .value?
+            .nilIfBlank
+    }
+
+    private static func decryptCISessionToken(_ cipher: CIProxyTokenCipher, password: String) throws -> String {
+        guard cipher.algorithm == "SHA256-SALTED+A256GCM",
+              let encryptedData = cipher.ciphertext.base64URLDecodedData,
+              let ivData = cipher.iv.base64URLDecodedData,
+              let saltData = cipher.salt.base64URLDecodedData,
+              encryptedData.count > 16 else {
+            throw CISessionUnlockError.invalidCipher
+        }
+        var material = Data(password.utf8)
+        material.append(0)
+        material.append(saltData)
+        let digest = SHA256.hash(data: material)
+        let key = SymmetricKey(data: Data(digest))
+        let ciphertext = Data(encryptedData.dropLast(16))
+        let tag = Data(encryptedData.suffix(16))
+        let sealedBox = try AES.GCM.SealedBox(
+            nonce: AES.GCM.Nonce(data: ivData),
+            ciphertext: ciphertext,
+            tag: tag
+        )
+        let plaintext = try AES.GCM.open(sealedBox, using: key)
+        guard let token = String(data: plaintext, encoding: .utf8)?.nilIfBlank else {
+            throw CISessionUnlockError.invalidPlaintext
+        }
+        return token
     }
 
     private func handleSpotlightURL(_ url: URL) -> Bool {
@@ -369,6 +540,11 @@ final class AppModel {
             status = simulators.isEmpty
                 ? serverStatusMessage ?? "Connected. No simulators found."
                 : "Connected."
+            Metrics.track(.serverConnected, properties: Metrics.endpointProperties(resolvedCandidate).merging([
+                "simulator_count": simulators.count,
+                "auto_start": autoStart,
+                "saved_endpoint": saveEndpoint
+            ]) { current, _ in current })
             hapticSuccess()
             if shouldContinuePollingProxy(simulatorsResponse) {
                 startProxyReadinessPolling(autoStart: autoStart)
@@ -383,12 +559,14 @@ final class AppModel {
                 return false
             }
             status = "Pairing required."
+            Metrics.track(.serverPairingRequired, properties: Metrics.endpointProperties(pendingAuthEndpoint))
             hapticWarning()
             presentPairing(for: pendingAuthEndpoint)
             return false
 
         case let .failed(message):
             status = message ?? "Unable to connect."
+            Metrics.track(.serverConnectionFailed, properties: Metrics.endpointProperties(connectionEndpoint))
             hapticWarning()
             return false
         }
@@ -568,7 +746,13 @@ final class AppModel {
             )
             .filter { $0 != pairedEndpoint.baseURL }
             savePairedEndpoints(primary: pairedEndpoint, alternates: link.alternateEndpoints, token: token)
-            return await connect(pairedEndpoint, autoStart: autoStart, saveEndpoint: true)
+            let connected = await connect(pairedEndpoint, autoStart: autoStart, saveEndpoint: true)
+            if connected {
+                Metrics.track(.serverPaired, properties: Metrics.endpointProperties(pairedEndpoint).merging([
+                    "pairing_method": "token_link"
+                ]) { current, _ in current })
+            }
+            return connected
         }
         guard let code = link.pairingCode?.nilIfBlank else {
             var pendingEndpoint = link.endpoint
@@ -613,11 +797,18 @@ final class AppModel {
             pairingCode = ""
             let connected = await connect(pairedEndpoint, autoStart: autoStart, saveEndpoint: true)
             if connected {
+                Metrics.track(.serverPaired, properties: Metrics.endpointProperties(pairedEndpoint).merging([
+                    "pairing_method": "pairing_code"
+                ]) { current, _ in current })
                 hapticSuccess()
             }
             return connected
         } catch {
             status = error.localizedDescription
+            Metrics.track(.serverPairFailed, properties: Metrics.endpointProperties(authEndpoint).merging([
+                "pairing_method": "pairing_code",
+                "error_kind": Metrics.errorKind(error)
+            ]) { current, _ in current })
             hapticWarning()
             return false
         }
@@ -629,6 +820,9 @@ final class AppModel {
         authEndpoint.token = manualToken.nilIfBlank
         let connected = await connect(authEndpoint, autoStart: false, saveEndpoint: true)
         if connected {
+            Metrics.track(.serverPaired, properties: Metrics.endpointProperties(authEndpoint).merging([
+                "pairing_method": "manual_token"
+            ]) { current, _ in current })
             hapticSuccess()
         }
         return connected
@@ -643,6 +837,20 @@ final class AppModel {
                 return await pair(link, autoStart: autoStart)
             case let .endpoint(endpoint, autoStart):
                 return await connect(endpoint, autoStart: autoStart, saveEndpoint: true)
+            case let .ciSession(session, autoStart):
+                if session.requiresPassword {
+                    pendingCISession = session
+                    status = "Enter the SimDeck CI session password."
+                    hapticSelection()
+                    requestPresentation(.ciSessionPassword)
+                    return false
+                }
+                guard session.token?.nilIfBlank != nil else {
+                    status = "This CI link is missing its SimDeck access token."
+                    hapticWarning()
+                    return false
+                }
+                return await connect(session.endpoint(), autoStart: autoStart, saveEndpoint: true)
             }
         }
         let digits = trimmed.filter(\.isNumber)
@@ -731,6 +939,9 @@ final class AppModel {
         hapticSelection()
         selectedSimulatorID = udid
         resetStreamPresentation()
+        Metrics.track(.simulatorSelected, properties: Metrics.endpointProperties(endpoint).merging(
+            Metrics.simulatorProperties(selectedSimulator)
+        ) { current, _ in current })
         guard endpoint != nil, udid != nil else {
             stopStream()
             return
@@ -766,8 +977,11 @@ final class AppModel {
             let client = WebRTCClient()
             client.onConnectionState = { [weak self] state in
                 Task { @MainActor in
-                    guard self?.isCurrentStreamRequest(generation, simulatorID: selectedSimulatorID) == true else { return }
-                    self?.streamState = StreamState(peerState: state)
+                    guard let self,
+                          self.isCurrentStreamRequest(generation, simulatorID: selectedSimulatorID) else { return }
+                    let newState = StreamState(peerState: state)
+                    self.streamState = newState
+                    self.handleReviewPromptOpportunity(for: newState)
                 }
             }
             client.onVideoSize = { [weak self] size in
@@ -821,6 +1035,14 @@ final class AppModel {
                 videoSize = CGSize(width: video.width, height: video.height)
             }
             status = "WebRTC connected."
+            Metrics.track(.streamConnected, properties: Metrics.endpointProperties(endpoint).merging(
+                Metrics.simulatorProperties(selectedSimulator)
+            ) { current, _ in current }.merging([
+                "automatic_reconnect": automaticReconnect,
+                "stream_encoder": effectiveStreamConfig.encoder.rawValue,
+                "stream_fps": effectiveStreamConfig.fps,
+                "stream_quality": effectiveStreamConfig.quality.rawValue
+            ]) { current, _ in current })
             if !automaticReconnect {
                 hapticSuccess()
             }
@@ -829,6 +1051,12 @@ final class AppModel {
             guard streamRequestGeneration == generation else { return false }
             streamState = .failed
             status = error.localizedDescription
+            Metrics.track(.streamConnectFailed, properties: Metrics.endpointProperties(endpoint).merging(
+                Metrics.simulatorProperties(selectedSimulator)
+            ) { current, _ in current }.merging([
+                "automatic_reconnect": automaticReconnect,
+                "error_kind": Metrics.errorKind(error)
+            ]) { current, _ in current })
             if !automaticReconnect {
                 hapticWarning()
                 scheduleStreamReconnect(reason: "connect-failed")
@@ -890,6 +1118,9 @@ final class AppModel {
             streamState = .connecting
         }
         status = "Starting \(simulator.name)."
+        Metrics.track(.simulatorBootRequested, properties: Metrics.endpointProperties(endpoint).merging(
+            Metrics.simulatorProperties(simulator)
+        ) { current, _ in current })
         hapticSelection()
         do {
             let api = SimDeckAPI(endpoint: endpoint)
@@ -901,6 +1132,9 @@ final class AppModel {
             status = "Started."
             simulatorLifecycleID = nil
             bootingSimulatorID = nil
+            Metrics.track(.simulatorBooted, properties: Metrics.endpointProperties(endpoint).merging(
+                Metrics.simulatorProperties(refreshedSimulators.first { $0.udid == simulator.udid } ?? simulator)
+            ) { current, _ in current })
             hapticSuccess()
             if autoStreamIfSelected, simulator.udid == selectedSimulatorID {
                 await startStream()
@@ -910,6 +1144,11 @@ final class AppModel {
             status = error.localizedDescription
             simulatorLifecycleID = nil
             bootingSimulatorID = nil
+            Metrics.track(.simulatorBootFailed, properties: Metrics.endpointProperties(endpoint).merging(
+                Metrics.simulatorProperties(simulator)
+            ) { current, _ in current }.merging([
+                "error_kind": Metrics.errorKind(error)
+            ]) { current, _ in current })
             hapticWarning()
         }
     }
@@ -1013,11 +1252,19 @@ final class AppModel {
             selectedSimulatorID = response.simulator.udid
             resetStreamPresentation()
             status = "Created \(response.simulator.name)."
+            Metrics.track(.simulatorCreated, properties: Metrics.endpointProperties(endpoint).merging(
+                Metrics.simulatorProperties(response.simulator)
+            ) { current, _ in current }.merging([
+                "paired_watch_requested": request.pairedWatch != nil
+            ]) { current, _ in current })
             hapticSuccess()
             await prepareSelectedSimulator()
             return true
         } catch {
             status = error.localizedDescription
+            Metrics.track(.simulatorCreateFailed, properties: Metrics.endpointProperties(endpoint).merging([
+                "error_kind": Metrics.errorKind(error)
+            ]) { current, _ in current })
             hapticWarning()
             return false
         }
@@ -1110,6 +1357,9 @@ final class AppModel {
     func toggleSimulatorSoftwareKeyboard() {
         guard selectedSimulatorID != nil else { return }
         hapticSelection()
+        Metrics.track(.softwareKeyboardToggled, properties: Metrics.endpointProperties(endpoint).merging(
+            Metrics.simulatorProperties(selectedSimulator)
+        ) { current, _ in current })
         let sent = streamClient?.toggleSimulatorSoftwareKeyboard() ?? false
         guard !sent else { return }
         Task {
@@ -1294,9 +1544,29 @@ final class AppModel {
         streamRequestGeneration == generation && selectedSimulatorID == simulatorID
     }
 
+    private func handleReviewPromptOpportunity(for state: StreamState) {
+        guard !UserDefaults.standard.bool(forKey: Self.didRequestReviewKey) else { return }
+        if state == .connected {
+            guard sustainedConnectionTask == nil else { return }
+            sustainedConnectionTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.sustainedConnectionTask = nil
+                guard self.streamState == .connected,
+                      !UserDefaults.standard.bool(forKey: Self.didRequestReviewKey) else { return }
+                UserDefaults.standard.set(true, forKey: Self.didRequestReviewKey)
+                self.reviewRequestPending = true
+            }
+        } else {
+            sustainedConnectionTask?.cancel()
+            sustainedConnectionTask = nil
+        }
+    }
+
     func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            consumePendingShortcutAction()
             streamClient?.appDidBecomeActive()
             Task { await refreshSimulatorsIfStale(maxAge: 1, silent: true, activity: .passive) }
             if endpoint?.usesCloudProxy == true,
@@ -1855,14 +2125,14 @@ final class AppModel {
               let index = savedEndpoints.firstIndex(where: { endpointsRepresentSameServer($0, endpoint) }) else {
             return
         }
-        savedEndpoints[index].name = trimmed
+        savedEndpoints[index].customName = trimmed
         if var current = self.endpoint, endpointsRepresentSameServer(current, endpoint) {
-            current.name = trimmed
+            current.customName = trimmed
             self.endpoint = current
             saveSelectedEndpoint(current)
         }
         if var pending = authEndpoint, endpointsRepresentSameServer(pending, endpoint) {
-            pending.name = trimmed
+            pending.customName = trimmed
             authEndpoint = pending
         }
         persistSavedEndpoints()
@@ -2063,6 +2333,7 @@ final class AppModel {
         merged.token = preferred.token ?? other.token
         merged.preferredSimulatorID = preferred.preferredSimulatorID ?? other.preferredSimulatorID
         merged.requiresPairing = preferred.requiresPairing && other.requiresPairing
+        merged.customName = preferred.customName ?? other.customName
         if let hostName = merged.hostName?.nilIfBlank {
             merged.name = hostName
         }
@@ -2197,6 +2468,10 @@ final class AppModel {
 
     private static func loadTouchOverlayVisible() -> Bool {
         UserDefaults.standard.object(forKey: touchOverlayVisibleKey) as? Bool ?? true
+    }
+
+    private static func loadTelemetryEnabled() -> Bool {
+        UserDefaults.standard.object(forKey: telemetryEnabledKey) as? Bool ?? true
     }
 
     func hapticSelection() {

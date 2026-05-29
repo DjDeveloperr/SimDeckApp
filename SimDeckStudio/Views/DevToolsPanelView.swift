@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WebKit
 
 private enum DevToolsPanelTarget: Identifiable, Hashable {
@@ -96,7 +97,7 @@ struct DevToolsPanelView: View {
                             reloadID: reloadID,
                             loadState: $webViewState
                         )
-                        .ignoresSafeArea(edges: .bottom)
+                        .ignoresSafeArea(.keyboard, edges: .bottom)
 
                         if let message = webViewState.message {
                             Label(message, systemImage: webViewState.isError ? "exclamationmark.triangle" : "network")
@@ -216,6 +217,11 @@ struct DevToolsPanelView: View {
         Button {
             model.hapticSelection()
             selectedTarget = target
+            Metrics.track(.devToolsTargetOpened, properties: Metrics.endpointProperties(model.endpoint).merging(
+                Metrics.simulatorProperties(model.selectedSimulator)
+            ) { current, _ in current }.merging([
+                "target_kind": target.metricsKind
+            ]) { current, _ in current })
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: target.systemImage)
@@ -299,9 +305,38 @@ struct DevToolsPanelView: View {
     }
 }
 
+private extension DevToolsPanelTarget {
+    var metricsKind: String {
+        switch self {
+        case .webKit:
+            return "webkit"
+        case .chrome:
+            return "chrome"
+        }
+    }
+}
+
 private struct EmbeddedDevToolsWebView: UIViewRepresentable {
     private static let inspectorPageZoom = 0.86
     private static let framedInspectorScale = 0.86
+
+    private static let disableInputZoomScript: WKUserScript = {
+        let source = """
+        (function() {
+            function applyViewport() {
+                var metas = document.querySelectorAll('meta[name="viewport"]');
+                metas.forEach(function(el) { el.parentNode && el.parentNode.removeChild(el); });
+                var meta = document.createElement('meta');
+                meta.name = 'viewport';
+                meta.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content';
+                (document.head || document.documentElement).appendChild(meta);
+            }
+            applyViewport();
+            document.addEventListener('DOMContentLoaded', applyViewport);
+        })();
+        """
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+    }()
 
     let url: URL
     let token: String?
@@ -313,18 +348,30 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
         configuration.userContentController.add(context.coordinator, name: "simdeckInspector")
+        configuration.userContentController.addUserScript(Self.disableInputZoomScript)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.scrollView.delegate = context.coordinator
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
         }
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.minimumZoomScale = 1
+        webView.scrollView.maximumZoomScale = 1
+        webView.scrollView.bouncesZoom = false
+        webView.scrollView.pinchGestureRecognizer?.isEnabled = false
+        webView.scrollView.contentInset = .zero
+        webView.scrollView.verticalScrollIndicatorInsets = .zero
+        webView.scrollView.horizontalScrollIndicatorInsets = .zero
+        context.coordinator.observeScrollInset(of: webView.scrollView)
+        context.coordinator.observeKeyboard(for: webView)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.loadState = $loadState
         webView.pageZoom = wrapsInFrame ? 1 : Self.inspectorPageZoom
+        webView.scrollView.setZoomScale(1, animated: false)
         guard context.coordinator.loadedURL != url
             || context.coordinator.reloadID != reloadID
             || context.coordinator.wrapsInFrame != wrapsInFrame else {
@@ -360,8 +407,11 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.stopObservingScrollInset()
+        coordinator.stopObservingKeyboard()
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "simdeckInspector")
         uiView.navigationDelegate = nil
+        uiView.scrollView.delegate = nil
     }
 
     private static func wrapperHTML(for url: URL) -> String {
@@ -371,10 +421,10 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         <!doctype html>
         <html>
         <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content">
         <style>
         html, body { width: 100%; height: 100%; margin: 0; padding: 0; background: #111; }
-        body { overflow: hidden; }
+        body { overflow: hidden; touch-action: none; }
         iframe {
             width: \(inverseScale * 100)%;
             height: \(inverseScale * 100)%;
@@ -423,14 +473,88 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         return HTTPCookie(properties: properties)
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, UIScrollViewDelegate {
         var loadedURL: URL?
         var reloadID: UUID?
         var wrapsInFrame = false
         var loadState: Binding<DevToolsWebViewState>
+        private var reloadWorkItem: DispatchWorkItem?
+        private var lastReloadAt = Date.distantPast
+        private var contentInsetObservation: NSKeyValueObservation?
+        private var indicatorInsetObservation: NSKeyValueObservation?
+        private weak var observedWebView: WKWebView?
+        private var keyboardObservers: [NSObjectProtocol] = []
+        private var savedContentOffset: CGPoint?
 
         init(loadState: Binding<DevToolsWebViewState>) {
             self.loadState = loadState
+        }
+
+        func observeScrollInset(of scrollView: UIScrollView) {
+            contentInsetObservation = scrollView.observe(\.contentInset, options: [.new]) { sv, _ in
+                if sv.contentInset != .zero {
+                    sv.contentInset = .zero
+                }
+            }
+            indicatorInsetObservation = scrollView.observe(\.verticalScrollIndicatorInsets, options: [.new]) { sv, _ in
+                if sv.verticalScrollIndicatorInsets != .zero {
+                    sv.verticalScrollIndicatorInsets = .zero
+                }
+            }
+        }
+
+        func observeKeyboard(for webView: WKWebView) {
+            observedWebView = webView
+            let center = NotificationCenter.default
+            keyboardObservers.append(center.addObserver(
+                forName: UIResponder.keyboardWillShowNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, let webView = self.observedWebView else { return }
+                self.savedContentOffset = webView.scrollView.contentOffset
+            })
+            keyboardObservers.append(center.addObserver(
+                forName: UIResponder.keyboardWillHideNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.restoreContentOffset()
+            })
+            keyboardObservers.append(center.addObserver(
+                forName: UIResponder.keyboardDidHideNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.restoreContentOffset()
+            })
+        }
+
+        private func restoreContentOffset() {
+            guard let webView = observedWebView else { return }
+            webView.scrollView.contentInset = .zero
+            webView.scrollView.verticalScrollIndicatorInsets = .zero
+            let target = savedContentOffset ?? .zero
+            if webView.scrollView.contentOffset != target {
+                webView.scrollView.setContentOffset(target, animated: false)
+            }
+            savedContentOffset = nil
+        }
+
+        func stopObservingKeyboard() {
+            for observer in keyboardObservers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            keyboardObservers.removeAll()
+            observedWebView = nil
+            savedContentOffset = nil
+        }
+
+        func stopObservingScrollInset() {
+            contentInsetObservation?.invalidate()
+            contentInsetObservation = nil
+            indicatorInsetObservation?.invalidate()
+            indicatorInsetObservation = nil
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -438,6 +562,7 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.scrollView.setZoomScale(1, animated: false)
             if !wrapsInFrame {
                 loadState.wrappedValue = DevToolsWebViewState()
             }
@@ -445,10 +570,21 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             loadState.wrappedValue = DevToolsWebViewState(message: "Inspector failed: \(error.localizedDescription)", isError: true)
+            scheduleReload(of: webView)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             loadState.wrappedValue = DevToolsWebViewState(message: "Inspector failed: \(error.localizedDescription)", isError: true)
+            scheduleReload(of: webView)
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            nil
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            guard scrollView.zoomScale != 1 else { return }
+            scrollView.setZoomScale(1, animated: false)
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -462,22 +598,45 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
                 switch state {
                 case "ready":
                     loadState.wrappedValue = DevToolsWebViewState()
+                    reloadWorkItem?.cancel()
                 case "stalled":
                     loadState.wrappedValue = DevToolsWebViewState(
-                        message: "Inspector connected, waiting for page content\(reason.map { ": \($0)" } ?? ".")",
+                        message: "Reconnecting DevTools\(reason.map { ": \($0)" } ?? "...")",
                         isError: false
                     )
+                    scheduleReload(of: message.webView)
                 default:
                     loadState.wrappedValue = DevToolsWebViewState(
                         message: "Inspector \(state)\(reason.map { ": \($0)" } ?? "...")",
                         isError: false
                     )
+                    if state == "failed" || state == "disconnected" {
+                        scheduleReload(of: message.webView)
+                    }
                 }
             } else if type == "simdeck:webkit-inspector:socket",
                       let state = payload["state"] as? String,
                       state != "open" {
                 loadState.wrappedValue = DevToolsWebViewState(message: "Inspector socket \(state)...", isError: false)
+                if state == "closed" || state == "failed" || state == "disconnected" {
+                    scheduleReload(of: message.webView)
+                }
             }
+        }
+
+        private func scheduleReload(of webView: WKWebView?) {
+            guard let webView else { return }
+            let now = Date()
+            let delay = max(1.2, 2.5 - now.timeIntervalSince(lastReloadAt))
+            reloadWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.lastReloadAt = Date()
+                self.loadState.wrappedValue = DevToolsWebViewState(message: "Reconnecting DevTools...", isError: false)
+                webView.reload()
+            }
+            reloadWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
         }
     }
 }
@@ -499,18 +658,22 @@ private extension URL {
     func addingSimDeckTokenToDevToolsWebSocket(_ token: String?) -> URL {
         guard let token = token?.nilIfBlank,
               var components = URLComponents(url: self, resolvingAgainstBaseURL: false),
-              var queryItems = components.queryItems,
-              let wsIndex = queryItems.firstIndex(where: { $0.name == "ws" }),
-              var wsValue = queryItems[wsIndex].value,
-              !wsValue.contains("simdeckToken=") else {
+              var queryItems = components.queryItems else {
             return self
         }
-        var tokenComponents = URLComponents()
-        tokenComponents.queryItems = [URLQueryItem(name: "simdeckToken", value: token)]
-        let tokenQuery = tokenComponents.percentEncodedQuery ?? "simdeckToken=\(token)"
-        wsValue += wsValue.contains("?") ? "&" : "?"
-        wsValue += tokenQuery
-        queryItems[wsIndex] = URLQueryItem(name: "ws", value: wsValue)
+        for socketParameter in ["ws", "wss"] {
+            guard let wsIndex = queryItems.firstIndex(where: { $0.name == socketParameter }),
+                  var wsValue = queryItems[wsIndex].value,
+                  !wsValue.contains("simdeckToken=") else {
+                continue
+            }
+            var tokenComponents = URLComponents()
+            tokenComponents.queryItems = [URLQueryItem(name: "simdeckToken", value: token)]
+            let tokenQuery = tokenComponents.percentEncodedQuery ?? "simdeckToken=\(token)"
+            wsValue += wsValue.contains("?") ? "&" : "?"
+            wsValue += tokenQuery
+            queryItems[wsIndex] = URLQueryItem(name: socketParameter, value: wsValue)
+        }
         components.queryItems = queryItems
         return components.url ?? self
     }

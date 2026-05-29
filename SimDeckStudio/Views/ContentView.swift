@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import StoreKit
 import SwiftUI
 import UIKit
 
@@ -6,6 +7,7 @@ struct ContentView: View {
     @Bindable var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.requestReview) private var requestReview
     @State private var searchText = ""
     @State private var searchExpanded = false
     @State private var devToolsDrawerPresented = false
@@ -24,6 +26,19 @@ struct ContentView: View {
         .onChange(of: showsStreamDetail) { _, isShowingStream in
             guard !isShowingStream else { return }
             closeDevToolsDrawerWithoutHaptics()
+        }
+        .onChange(of: model.reviewRequestPending) { _, pending in
+            guard pending else { return }
+            model.reviewRequestPending = false
+            requestReview()
+        }
+        .sheet(isPresented: $model.pairingSheetPresented) {
+            ConnectServerSheet(model: model)
+        }
+        .sheet(isPresented: $model.pairingScannerPresented) {
+            QRCodeScannerSheet(model: model) {
+                model.pairingScannerPresented = false
+            }
         }
     }
 
@@ -60,7 +75,7 @@ struct ContentView: View {
                         .frame(width: 1)
                 }
                 .offset(x: offset)
-                .simultaneousGesture(devToolsDrawerGesture(width: drawerWidth))
+                .simultaneousGesture(devToolsDrawerGesture(width: drawerWidth, leftEdgeStripWidth: drawerWidth * 0.2))
                 .allowsHitTesting(progress > 0.01)
                 .ignoresSafeArea()
 
@@ -101,9 +116,10 @@ struct ContentView: View {
         return .black.opacity(0.24 * progress)
     }
 
-    private func devToolsDrawerGesture(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+    private func devToolsDrawerGesture(width: CGFloat, leftEdgeStripWidth: CGFloat? = nil) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
             .onChanged { value in
+                if let strip = leftEdgeStripWidth, value.startLocation.x > strip { return }
                 guard abs(value.translation.width) > abs(value.translation.height) else { return }
                 var transaction = Transaction()
                 transaction.animation = nil
@@ -112,7 +128,12 @@ struct ContentView: View {
                 }
             }
             .onEnded { value in
-                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                if let strip = leftEdgeStripWidth, value.startLocation.x > strip {
+                    if devToolsDrawerTranslation != 0 {
+                        setDevToolsDrawerPresented(devToolsDrawerPresented)
+                    }
+                    return
+                }
                 let projectedTranslation = normalizedDevToolsDrawerTranslation(value.predictedEndTranslation.width)
                 let projectedOffset = devToolsDrawerOffset(width: width, projectedTranslation: projectedTranslation)
                 setDevToolsDrawerPresented(projectedOffset < width * 0.5)
@@ -146,6 +167,9 @@ struct ContentView: View {
 
     private func openDevToolsDrawer() {
         guard showsStreamDetail else { return }
+        Metrics.track(.devToolsOpened, properties: Metrics.endpointProperties(model.endpoint).merging(
+            Metrics.simulatorProperties(model.selectedSimulator)
+        ) { current, _ in current })
         toggleDevToolsDrawerPresented(true)
     }
 
@@ -273,8 +297,12 @@ private struct SidebarView: View {
                     PairServerSheet(model: model)
                 case .settings:
                     SettingsSheet(model: model)
+                case .privacy:
+                    PrivacyPolicySheet()
                 case .newSimulator:
                     NewSimulatorSheet(model: model)
+                case .ciSessionPassword:
+                    CISessionPasswordSheet(model: model)
                 }
             }
             .sheet(isPresented: $isScanningPairingQR) {
@@ -286,6 +314,21 @@ private struct SidebarView: View {
                 if endpointID != nil {
                     presentedSheet = .pair
                 }
+            }
+            .onChange(of: model.presentationRequest) { _, request in
+                guard let request else { return }
+                switch request {
+                case .pair:
+                    isScanningPairingQR = false
+                    presentedSheet = .connect
+                case .scanPairingQR:
+                    presentedSheet = nil
+                    isScanningPairingQR = true
+                case .ciSessionPassword:
+                    isScanningPairingQR = false
+                    presentedSheet = .ciSessionPassword
+                }
+                model.consumePresentationRequest()
             }
     }
 
@@ -356,6 +399,10 @@ private struct SidebarView: View {
                         model.hapticSelection()
                         isScanningPairingQR = true
                     },
+                    showPrivacyPolicy: {
+                        model.hapticSelection()
+                        presentedSheet = .privacy
+                    },
                     copyInstallCommands: {
                         model.hapticSuccess()
                     }
@@ -419,7 +466,7 @@ private struct SidebarView: View {
             }
             .contentMargins(
                 .top,
-                showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0,
+                (showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0) + 2,
                 for: .scrollContent
             )
             .background {
@@ -434,7 +481,7 @@ private struct SidebarView: View {
             }
             .contentMargins(
                 .top,
-                showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0,
+                (showsSimulatorTypeFilters ? simulatorFilterHeaderHeight : 0) + 2,
                 for: .scrollContent
             )
             .background {
@@ -603,7 +650,9 @@ private enum SidebarSheet: Identifiable {
     case connect
     case pair
     case settings
+    case privacy
     case newSimulator
+    case ciSessionPassword
 
     var id: Self { self }
 }
@@ -758,6 +807,7 @@ private struct NoServerActionsView: View {
     let selectServer: () -> Void
     let pairServer: () -> Void
     let scanQR: () -> Void
+    let showPrivacyPolicy: () -> Void
     let copyInstallCommands: () -> Void
 
     var body: some View {
@@ -793,6 +843,10 @@ private struct NoServerActionsView: View {
                 neutralActionButton("Pair New Server", systemImage: "checkmark.seal", action: pairServer)
                 neutralActionButton("Scan QR", systemImage: "qrcode.viewfinder", action: scanQR)
             }
+            Button("Privacy Policy", action: showPrivacyPolicy)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
         }
     }
 
@@ -1107,7 +1161,7 @@ private struct ServerSelectionSheet: View {
     private func beginRenaming(_ endpoint: SimDeckEndpoint) {
         model.hapticSelection()
         renamingEndpoint = endpoint
-        renameText = endpoint.name
+        renameText = endpoint.customName ?? endpoint.name
     }
 }
 
@@ -1294,14 +1348,77 @@ private struct PairServerSheet: View {
     }
 }
 
+private enum SimDeckAppIcon: String, CaseIterable, Identifiable {
+    case `default`
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var alternateName: String? {
+        switch self {
+        case .default: return nil
+        case .light: return "AppIcon-Light"
+        case .dark: return "AppIcon-Dark"
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .default: return "Default"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .default: return "app.badge.fill"
+        case .light: return "sun.max.fill"
+        case .dark: return "moon.fill"
+        }
+    }
+
+    static var current: SimDeckAppIcon {
+        switch UIApplication.shared.alternateIconName {
+        case "AppIcon-Light": return .light
+        case "AppIcon-Dark": return .dark
+        default: return .default
+        }
+    }
+}
+
 private struct SettingsSheet: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var isResetConnectionsConfirmationPresented = false
+    @State private var isPrivacyPolicyPresented = false
+    @State private var iconSelection: SimDeckAppIcon = .current
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("App Icon") {
+                    Picker(selection: $iconSelection) {
+                        ForEach(SimDeckAppIcon.allCases) { icon in
+                            Label(icon.displayName, systemImage: icon.systemImage).tag(icon)
+                        }
+                    } label: {
+                        Label("App Icon", systemImage: iconSelection.systemImage)
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: iconSelection) { _, selection in
+                        guard UIApplication.shared.alternateIconName != selection.alternateName else { return }
+                        model.hapticSelection()
+                        UIApplication.shared.setAlternateIconName(selection.alternateName) { error in
+                            if error != nil {
+                                Task { @MainActor in
+                                    iconSelection = .current
+                                }
+                            }
+                        }
+                    }
+                }
                 Section {
                     Toggle("Haptics", isOn: $model.hapticsEnabled)
                         .onChange(of: model.hapticsEnabled) { _, enabled in
@@ -1311,11 +1428,25 @@ private struct SettingsSheet: View {
                         }
                 }
                 Section {
+                    Toggle("Share Product Telemetry", isOn: $model.telemetryEnabled)
+                } footer: {
+                    Text("Shares first-party pseudonymous usage and reliability events. SimDeck does not send server addresses, pairing tokens, simulator identifiers, simulator names, device names, source code, project paths, or user-entered text.")
+                }
+                Section {
+                    Button {
+                        model.hapticSelection()
+                        isPrivacyPolicyPresented = true
+                    } label: {
+                        Label("Privacy Policy", systemImage: "hand.raised")
+                    }
+                }
+                Section {
                     Button(role: .destructive) {
                         model.hapticSelection()
                         isResetConnectionsConfirmationPresented = true
                     } label: {
                         Label("Reset Connections", systemImage: "trash")
+                            .foregroundStyle(.red)
                     }
                 } footer: {
                     Text("Clears saved servers and pairing credentials from this iPhone.")
@@ -1344,7 +1475,144 @@ private struct SettingsSheet: View {
                 Text("All saved servers and pairing credentials will be removed.")
             }
         }
+        .sheet(isPresented: $isPrivacyPolicyPresented) {
+            PrivacyPolicySheet()
+        }
         .presentationDetents([.medium])
+    }
+}
+
+private struct PrivacyPolicySection: Identifiable {
+    let id = UUID()
+    let title: String
+    let body: String
+}
+
+private struct PrivacyPolicySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var sections: [PrivacyPolicySection] = PrivacyPolicySheet.fallbackSections
+    @State private var loadingFailed = false
+
+    private static let remoteURL = URL(string: "https://raw.githubusercontent.com/NativeScript/SimDeck/main/docs/PRIVACY.md")!
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(sections) { section in
+                        policySection(section.title, section.body)
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle("Privacy Policy")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .task {
+            await loadRemotePolicy()
+        }
+    }
+
+    private func loadRemotePolicy() async {
+        var request = URLRequest(url: Self.remoteURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 10
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let markdown = String(data: data, encoding: .utf8) else {
+                loadingFailed = true
+                return
+            }
+            let parsed = Self.parseSections(markdown)
+            if !parsed.isEmpty {
+                sections = parsed
+            }
+        } catch {
+            loadingFailed = true
+        }
+    }
+
+    private static func parseSections(_ markdown: String) -> [PrivacyPolicySection] {
+        var result: [PrivacyPolicySection] = []
+        var currentTitle: String? = nil
+        var currentBody: [String] = []
+
+        func flush() {
+            guard let title = currentTitle else { return }
+            let body = currentBody.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return }
+            result.append(PrivacyPolicySection(title: title, body: body))
+        }
+
+        for rawLine in markdown.components(separatedBy: "\n") {
+            let line = rawLine
+            if let title = headingTitle(line, level: 1) {
+                flush()
+                currentTitle = title
+                currentBody = []
+            } else if let title = headingTitle(line, level: 2) {
+                flush()
+                currentTitle = title
+                currentBody = []
+            } else {
+                currentBody.append(line)
+            }
+        }
+        flush()
+        return result
+    }
+
+    private static func headingTitle(_ line: String, level: Int) -> String? {
+        let prefix = String(repeating: "#", count: level) + " "
+        guard line.hasPrefix(prefix) else { return nil }
+        return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+    }
+
+    private static let fallbackSections: [PrivacyPolicySection] = [
+        .init(
+            title: "SimDeck Privacy Policy",
+            body: "Last updated: May 28, 2026\n\nSimDeck is built to connect your iPhone or iPad to a SimDeck server that you choose. We do not sell, rent, share, or monetize personal data."
+        ),
+        .init(
+            title: "Data We Collect",
+            body: "SimDeck may collect first-party pseudonymous product telemetry to understand whether core workflows are reliable. Examples include app launched, server paired, server connected, simulator boot requested, simulator booted, stream connected, feature toggled, and coarse error or latency diagnostics.\n\nTelemetry does not include server addresses, pairing tokens, simulator identifiers, simulator names, device names, IP-derived location, Tailscale node names, Apple IDs, email addresses, LAN hostnames, source code, project names, file paths, payloads, or user-entered text.\n\nTelemetry uses a random app-generated identifier. SimDeck does not use the device advertising identifier, does not use analytics profiles, and does not use analytics for ads, marketing attribution, data broker sharing, cross-app tracking, or session replay. You can disable telemetry in the app's Settings screen."
+        ),
+        .init(
+            title: "Local Data",
+            body: "The app may store server addresses, pairing tokens, and connection preferences on your device so you can reconnect to your own SimDeck server. This information stays on your device and is not sent to us."
+        ),
+        .init(
+            title: "Connections To Your SimDeck Server",
+            body: "When you connect to a SimDeck server, the app sends requests, pairing credentials, simulator controls, and stream negotiation data only to the server you selected or paired with. We do not operate an intermediate service that receives this data.\n\nYour SimDeck server may process simulator sessions, device lists, live streams, and control commands as part of the app's core functionality. That activity remains between your device and the server you choose."
+        ),
+        .init(
+            title: "Third Parties",
+            body: "SimDeck uses Mixpanel to receive product telemetry described above. We do not send Mixpanel server addresses, pairing credentials, simulator identifiers, simulator names, user-entered text, project data, or source code."
+        ),
+        .init(
+            title: "Contact",
+            body: "If you have questions about this privacy policy, contact us at support@nativescript.org."
+        )
+    ]
+
+    private func policySection(_ title: String, _ body: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(body)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -1848,6 +2116,63 @@ private struct ConnectServerSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+private struct CISessionPasswordSheet: View {
+    @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var password = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("Session Password", text: $password)
+                        .textContentType(.password)
+                        .submitLabel(.go)
+                        .onSubmit(unlock)
+                    Button {
+                        model.hapticSelection()
+                        unlock()
+                    } label: {
+                        Label("Unlock Session", systemImage: "lock.open")
+                    }
+                    .disabled(password.isEmpty)
+                } header: {
+                    Text(model.pendingCISession?.displayName ?? "SimDeck CI")
+                } footer: {
+                    Text("Encrypted CI links keep the SimDeck access token locked until you enter the workflow password.")
+                }
+
+                if !model.status.isEmpty {
+                    Section {
+                        Text(model.status)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("CI Session")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        model.hapticSelection()
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private func unlock() {
+        Task {
+            if await model.unlockPendingCISession(password: password) {
+                dismiss()
+            }
+        }
     }
 }
 
