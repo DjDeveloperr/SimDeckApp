@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum EndpointSource: String, Codable, CaseIterable, Sendable {
@@ -514,6 +515,306 @@ struct ChromeButtonProfile: Hashable, Codable, Sendable {
 struct ChromeButtonOffset: Hashable, Codable, Sendable {
     let x: Double
     let y: Double
+}
+
+enum JSONValue: Hashable, Codable, Sendable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: JSONValue].self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .number(let value):
+            try container.encode(value)
+        case .bool(let value):
+            try container.encode(value)
+        case .object(let value):
+            try container.encode(value)
+        case .array(let value):
+            try container.encode(value)
+        case .null:
+            try container.encodeNil()
+        }
+    }
+
+    var compactDescription: String {
+        switch self {
+        case .string(let value):
+            return value
+        case .number(let value):
+            return value.rounded() == value ? String(Int(value)) : String(value)
+        case .bool(let value):
+            return value ? "true" : "false"
+        case .object(let value):
+            let entries = value
+                .sorted { $0.key < $1.key }
+                .prefix(6)
+                .map { "\($0.key): \($0.value.compactDescription)" }
+            return "{\(entries.joined(separator: ", "))}"
+        case .array(let value):
+            return "[\(value.prefix(6).map(\.compactDescription).joined(separator: ", "))]"
+        case .null:
+            return "null"
+        }
+    }
+}
+
+struct AccessibilityFrame: Hashable, Codable, Sendable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+
+    var isValid: Bool {
+        x.isFinite && y.isFinite && width.isFinite && height.isFinite && width > 0 && height > 0
+    }
+
+    var cgRect: CGRect {
+        CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+struct AccessibilitySourceLocation: Hashable, Codable, Sendable {
+    let column: Int?
+    let file: String?
+    let kind: String?
+    let line: Int?
+    let offset: Int?
+}
+
+struct AccessibilityNode: Decodable, Sendable {
+    let AXFrame: String?
+    let AXIdentifier: String?
+    let AXLabel: String?
+    let AXUniqueId: String?
+    let AXValue: String?
+    let alpha: Double?
+    let androidClass: String?
+    let androidPackage: String?
+    let androidResourceId: String?
+    let backgroundColor: [String: JSONValue]?
+    let bounds: AccessibilityFrame?
+    let checkable: Bool?
+    let checked: Bool?
+    let children: [AccessibilityNode]?
+    let className: String?
+    let clickable: Bool?
+    let control: [String: JSONValue]?
+    let customActions: [String]?
+    let debugDescription: String?
+    let displayName: String?
+    let enabled: Bool?
+    let focusable: Bool?
+    let focused: Bool?
+    let frame: AccessibilityFrame?
+    let frameInScreen: AccessibilityFrame?
+    let flutter: [String: JSONValue]?
+    let help: String?
+    let id: String?
+    let imageName: String?
+    let inspectorId: String?
+    let isHidden: Bool?
+    let isOpaque: Bool?
+    let isUserInteractionEnabled: Bool?
+    let longClickable: Bool?
+    let moduleName: String?
+    let nativeScript: [String: JSONValue]?
+    let password: Bool?
+    let pid: Int?
+    let placeholder: String?
+    let label: String?
+    let reactNative: [String: JSONValue]?
+    let role: String?
+    let roleDescription: String?
+    let scroll: [String: JSONValue]?
+    let scrollable: Bool?
+    let selected: Bool?
+    let semantics: [String: JSONValue]?
+    let source: String?
+    let sourceColumn: Int?
+    let sourceFile: String?
+    let sourceLine: Int?
+    let sourceLocation: AccessibilitySourceLocation?
+    let sourceLocations: [AccessibilitySourceLocation]?
+    let subrole: String?
+    let swiftUI: [String: JSONValue]?
+    let text: String?
+    let title: String?
+    let type: String?
+    let uikit: [String: JSONValue]?
+    let uikitId: String?
+    let uikitScript: [String: JSONValue]?
+    let viewController: [String: JSONValue]?
+
+    private enum CodingKeys: String, CodingKey {
+        case AXFrame
+        case AXIdentifier
+        case AXLabel
+        case AXUniqueId
+        case AXValue
+        case alpha
+        case androidClass
+        case androidPackage
+        case androidResourceId
+        case backgroundColor
+        case bounds
+        case checkable
+        case checked
+        case children
+        case className
+        case clickable
+        case control
+        case customActions = "custom_actions"
+        case debugDescription
+        case displayName
+        case enabled
+        case focusable
+        case focused
+        case frame
+        case frameInScreen
+        case flutter
+        case help
+        case id
+        case imageName
+        case inspectorId
+        case isHidden
+        case isOpaque
+        case isUserInteractionEnabled
+        case longClickable
+        case moduleName
+        case nativeScript
+        case password
+        case pid
+        case placeholder
+        case label
+        case reactNative
+        case role
+        case roleDescription = "role_description"
+        case scroll
+        case scrollable
+        case selected
+        case semantics
+        case source
+        case sourceColumn
+        case sourceFile
+        case sourceLine
+        case sourceLocation
+        case sourceLocations
+        case subrole
+        case swiftUI
+        case text
+        case title
+        case type
+        case uikit
+        case uikitId
+        case uikitScript
+        case viewController
+    }
+}
+
+struct AccessibilityTreeResponse: Decodable, Sendable {
+    let availableSources: [String]?
+    let fallbackReason: String?
+    let fallbackSource: String?
+    let inspector: [String: JSONValue]?
+    let roots: [AccessibilityNode]
+    let source: String
+}
+
+struct SimulatorAnnotationDetail: Hashable, Codable, Sendable {
+    let name: String
+    let value: String
+}
+
+struct SimulatorAnnotationContext: Identifiable, Hashable, Codable, Sendable {
+    var id: String { elementID }
+
+    let elementID: String
+    let kind: String
+    let label: String
+    let identifier: String
+    let value: String
+    let source: String
+    let sourceLocation: String
+    let frame: AccessibilityFrame?
+    let ancestry: [String]
+    let siblings: [String]
+    let details: [SimulatorAnnotationDetail]
+}
+
+struct SimulatorAnnotation: Identifiable, Hashable, Codable, Sendable {
+    let id: UUID
+    let createdAt: Date
+    let serverName: String
+    let simulatorName: String
+    let simulatorUDID: String
+    let context: SimulatorAnnotationContext
+    let prompt: String
+
+    var exportText: String {
+        var lines: [String] = [
+            "Annotation \(createdAt.formatted(date: .abbreviated, time: .standard))",
+            "Simulator: \(simulatorName) (\(simulatorUDID))",
+            "Server: \(serverName)",
+            "Element: \(context.kind)\(context.label.isEmpty ? "" : " \"\(context.label)\"")"
+        ]
+        append("Identifier", context.identifier, to: &lines)
+        append("Value", context.value, to: &lines)
+        append("Source", context.source, to: &lines)
+        append("File", context.sourceLocation, to: &lines)
+        if let frame = context.frame, frame.isValid {
+            lines.append(
+                "Frame: x \(format(frame.x)), y \(format(frame.y)), w \(format(frame.width)), h \(format(frame.height))"
+            )
+        }
+        if !context.ancestry.isEmpty {
+            lines.append("Parents:")
+            lines.append(contentsOf: context.ancestry.map { "- \($0)" })
+        }
+        if !context.siblings.isEmpty {
+            lines.append("Siblings:")
+            lines.append(contentsOf: context.siblings.map { "- \($0)" })
+        }
+        if !context.details.isEmpty {
+            lines.append("Details:")
+            lines.append(contentsOf: context.details.map { "- \($0.name): \($0.value)" })
+        }
+        lines.append("Prompt:")
+        lines.append(prompt)
+        return lines.joined(separator: "\n")
+    }
+
+    private func append(_ name: String, _ value: String, to lines: inout [String]) {
+        guard !value.isEmpty else { return }
+        lines.append("\(name): \(value)")
+    }
+
+    private func format(_ value: Double) -> String {
+        value.rounded() == value ? String(Int(value)) : value.formatted(.number.precision(.fractionLength(1)))
+    }
 }
 
 struct SimulatorsResponse: Decodable, Sendable {

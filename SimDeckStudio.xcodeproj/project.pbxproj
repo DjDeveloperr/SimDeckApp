@@ -16,6 +16,7 @@
 		32F600000000000000000104 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000204 /* ContentView.swift */; };
 		32F600000000000000000105 /* SimulatorStreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000205 /* SimulatorStreamView.swift */; };
 		32F600000000000000000115 /* DevToolsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000216 /* DevToolsPanelView.swift */; };
+		32F600000000000000000118 /* AnnotationOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000219 /* AnnotationOverlayView.swift */; };
 		32F600000000000000000106 /* SimDeckAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000206 /* SimDeckAPI.swift */; };
 		32F600000000000000000107 /* StudioLinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000207 /* StudioLinkResolver.swift */; };
 		32F600000000000000000108 /* SimDeckDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F600000000000000000208 /* SimDeckDiscovery.swift */; };
@@ -62,6 +63,7 @@
 		32F600000000000000000204 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		32F600000000000000000205 /* SimulatorStreamView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorStreamView.swift; sourceTree = "<group>"; };
 		32F600000000000000000216 /* DevToolsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevToolsPanelView.swift; sourceTree = "<group>"; };
+		32F600000000000000000219 /* AnnotationOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationOverlayView.swift; sourceTree = "<group>"; };
 		32F600000000000000000206 /* SimDeckAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimDeckAPI.swift; sourceTree = "<group>"; };
 		32F600000000000000000207 /* StudioLinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioLinkResolver.swift; sourceTree = "<group>"; };
 		32F600000000000000000208 /* SimDeckDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimDeckDiscovery.swift; sourceTree = "<group>"; };
@@ -181,6 +183,7 @@
 				32F600000000000000000204 /* ContentView.swift */,
 				32F600000000000000000205 /* SimulatorStreamView.swift */,
 				32F600000000000000000216 /* DevToolsPanelView.swift */,
+				32F600000000000000000219 /* AnnotationOverlayView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -298,6 +301,7 @@
 				32F600000000000000000104 /* ContentView.swift in Sources */,
 				32F600000000000000000105 /* SimulatorStreamView.swift in Sources */,
 				32F600000000000000000115 /* DevToolsPanelView.swift in Sources */,
+				32F600000000000000000118 /* AnnotationOverlayView.swift in Sources */,
 				32F600000000000000000106 /* SimDeckAPI.swift in Sources */,
 				32F600000000000000000107 /* StudioLinkResolver.swift in Sources */,
 				32F600000000000000000108 /* SimDeckDiscovery.swift in Sources */,
@@ -466,7 +470,7 @@
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "AppIcon-Light AppIcon-Dark";
 				CODE_SIGN_ENTITLEMENTS = SimDeckStudio/SimDeckStudio.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20260529050347;
+				CURRENT_PROJECT_VERSION = 20260531024845;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = CS838V553Y;
 				ENABLE_PREVIEWS = YES;
@@ -477,7 +481,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.nativescript.simdeck;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -496,7 +500,7 @@
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "AppIcon-Light AppIcon-Dark";
 				CODE_SIGN_ENTITLEMENTS = SimDeckStudio/SimDeckStudio.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20260529050347;
+				CURRENT_PROJECT_VERSION = 20260531024845;
 				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = CS838V553Y;
 				ENABLE_PREVIEWS = YES;
@@ -507,7 +511,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.nativescript.simdeck;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

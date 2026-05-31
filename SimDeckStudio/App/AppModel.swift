@@ -131,10 +131,20 @@ final class AppModel {
     private static let streamConfigKey = "streamConfig"
     private static let hapticsEnabledKey = "hapticsEnabled"
     private static let touchOverlayVisibleKey = "touchOverlayVisible"
+    private static let simulatorAnnotationsKey = "simulatorAnnotations"
     private static let telemetryEnabledKey = "telemetryEnabled"
     private static let didRequestReviewKey = "didRequestReview"
     private static let chromeCacheDirectoryName = "ChromeAssets"
     private static let lastFrameCacheDirectoryName = "LastStreamFrames"
+    private static let annotationTreeMaxDepth: Int? = nil
+    private static let annotationPreferredSources = [
+        "react-native",
+        "nativescript",
+        "flutter",
+        "swiftui",
+        "uikit",
+        "in-app-inspector"
+    ]
 
     var endpoint: SimDeckEndpoint?
     var savedEndpoints: [SimDeckEndpoint] = []
@@ -157,6 +167,15 @@ final class AppModel {
     var streamDiagnostics = StreamDiagnostics()
     var streamReconnects = 0
     var streamReconnectReason = ""
+    var annotationModeActive = false
+    var annotationAccessibilityTree: AccessibilityTreeResponse?
+    var annotationAccessibilityError = ""
+    var annotationAccessibilityLoading = false
+    var annotations = AppModel.loadAnnotations() {
+        didSet {
+            Self.persistAnnotations(annotations)
+        }
+    }
     var bootingSimulatorID: String?
     var simulatorLifecycleID: String?
     var streamDisplayToken = 0
@@ -189,6 +208,10 @@ final class AppModel {
     @ObservationIgnored private var isAutoConnecting = false
     @ObservationIgnored private var connectionGeneration = 0
     @ObservationIgnored private var streamRequestGeneration = 0
+    @ObservationIgnored private var annotationRequestGeneration = 0
+    @ObservationIgnored private var annotationLiveRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var annotationFastRefreshActive = false
+    @ObservationIgnored private var annotationPreferredSource: String?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var proxyReadinessTask: Task<Void, Never>?
     @ObservationIgnored private var lastReconnectStartedAt = Date.distantPast
@@ -937,6 +960,7 @@ final class AppModel {
     func selectSimulator(_ udid: String?) {
         guard selectedSimulatorID != udid else { return }
         hapticSelection()
+        deactivateAnnotationMode()
         selectedSimulatorID = udid
         resetStreamPresentation()
         Metrics.track(.simulatorSelected, properties: Metrics.endpointProperties(endpoint).merging(
@@ -947,6 +971,195 @@ final class AppModel {
             return
         }
         Task { await prepareSelectedSimulator() }
+    }
+
+    func setAnnotationModeActive(_ active: Bool) {
+        guard active else {
+            deactivateAnnotationMode()
+            return
+        }
+        guard endpoint != nil, selectedSimulatorID != nil, selectedSimulator?.isBooted == true else {
+            status = selectedSimulator == nil ? "Select a simulator first." : "Boot the simulator to annotate UI."
+            hapticWarning()
+            return
+        }
+        annotationModeActive = true
+        annotationAccessibilityError = ""
+        hapticSelection()
+        ensureAnnotationRefreshLoop()
+    }
+
+    func deactivateAnnotationMode() {
+        annotationRequestGeneration += 1
+        annotationLiveRefreshTask?.cancel()
+        annotationLiveRefreshTask = nil
+        annotationFastRefreshActive = false
+        annotationModeActive = false
+        annotationAccessibilityTree = nil
+        annotationAccessibilityError = ""
+        annotationAccessibilityLoading = false
+        annotationPreferredSource = nil
+    }
+
+    func startAnnotationLiveRefresh() {
+        annotationFastRefreshActive = true
+        ensureAnnotationRefreshLoop()
+    }
+
+    private func ensureAnnotationRefreshLoop() {
+        guard annotationModeActive, annotationLiveRefreshTask == nil else { return }
+        annotationLiveRefreshTask = Task { @MainActor in
+            while !Task.isCancelled && annotationModeActive {
+                await refreshAnnotationAccessibilityTree()
+                try? await Task.sleep(for: .milliseconds(annotationFastRefreshActive ? 140 : 800))
+            }
+        }
+    }
+
+    func stopAnnotationLiveRefresh(refreshAfterStopping: Bool = true) {
+        annotationFastRefreshActive = false
+        guard refreshAfterStopping, annotationModeActive else { return }
+        Task { await refreshAnnotationAccessibilityTree() }
+    }
+
+    func refreshAnnotationAccessibilityTree(showErrorFeedback: Bool = false) async {
+        guard annotationModeActive,
+              let endpoint,
+              let selectedSimulatorID,
+              selectedSimulator?.isBooted == true else {
+            annotationAccessibilityTree = nil
+            annotationAccessibilityError = ""
+            annotationAccessibilityLoading = false
+            return
+        }
+
+        annotationRequestGeneration += 1
+        let generation = annotationRequestGeneration
+        annotationAccessibilityLoading = annotationAccessibilityTree == nil
+        annotationAccessibilityError = ""
+        defer {
+            if annotationRequestGeneration == generation {
+                annotationAccessibilityLoading = false
+            }
+        }
+        do {
+            let tree = try await loadAnnotationAccessibilityTree(
+                api: SimDeckAPI(endpoint: endpoint),
+                udid: selectedSimulatorID
+            )
+            guard annotationRequestGeneration == generation,
+                  annotationModeActive,
+                  self.endpoint?.baseURL == endpoint.baseURL,
+                  self.selectedSimulatorID == selectedSimulatorID else {
+                return
+            }
+            annotationAccessibilityTree = tree
+            if tree.roots.isEmpty {
+                annotationAccessibilityError = tree.fallbackReason?.nilIfBlank ?? "No inspectable elements found."
+            }
+        } catch {
+            guard annotationRequestGeneration == generation,
+                  annotationModeActive,
+                  self.endpoint?.baseURL == endpoint.baseURL,
+                  self.selectedSimulatorID == selectedSimulatorID else {
+                return
+            }
+            annotationAccessibilityTree = nil
+            annotationAccessibilityError = error.localizedDescription
+            if showErrorFeedback {
+                status = error.localizedDescription
+                hapticWarning()
+            }
+        }
+    }
+
+    private func loadAnnotationAccessibilityTree(api: SimDeckAPI, udid: String) async throws -> AccessibilityTreeResponse {
+        if let preferredSource = annotationPreferredSource {
+            do {
+                let tree = try await api.accessibilityTree(
+                    udid: udid,
+                    source: preferredSource,
+                    maxDepth: Self.annotationTreeMaxDepth
+                )
+                if !tree.roots.isEmpty {
+                    return tree
+                }
+            } catch {
+                annotationPreferredSource = nil
+            }
+        }
+
+        let autoTree = try await api.accessibilityTree(
+            udid: udid,
+            source: "auto",
+            maxDepth: Self.annotationTreeMaxDepth
+        )
+        if Self.isPreferredAnnotationSource(autoTree.source) {
+            annotationPreferredSource = autoTree.source
+            return autoTree
+        }
+
+        for source in Self.preferredAnnotationSources(from: autoTree.availableSources) {
+            do {
+                let tree = try await api.accessibilityTree(
+                    udid: udid,
+                    source: source,
+                    maxDepth: Self.annotationTreeMaxDepth
+                )
+                if !tree.roots.isEmpty {
+                    annotationPreferredSource = source
+                    return tree
+                }
+            } catch {
+                continue
+            }
+        }
+
+        annotationPreferredSource = nil
+        return autoTree
+    }
+
+    private static func preferredAnnotationSources(from availableSources: [String]?) -> [String] {
+        guard let availableSources else { return [] }
+        let available = Set(availableSources.map { $0.lowercased() })
+        return annotationPreferredSources.filter { available.contains($0) }
+    }
+
+    private static func isPreferredAnnotationSource(_ source: String?) -> Bool {
+        guard let source else { return false }
+        return annotationPreferredSources.contains(source.lowercased())
+    }
+
+    func addAnnotation(prompt: String, context: SimulatorAnnotationContext) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        annotations.append(
+            SimulatorAnnotation(
+                id: UUID(),
+                createdAt: Date(),
+                serverName: endpoint?.displayName ?? "Unknown server",
+                simulatorName: selectedSimulator?.name ?? "Unknown simulator",
+                simulatorUDID: selectedSimulatorID ?? "-",
+                context: context,
+                prompt: trimmed
+            )
+        )
+        status = "Annotation saved."
+        hapticSuccess()
+    }
+
+    func clearAnnotations() {
+        guard !annotations.isEmpty else { return }
+        annotations = []
+        status = "Annotations cleared."
+        hapticWarning()
+    }
+
+    var annotationsExportText: String {
+        annotations
+            .sorted { $0.createdAt < $1.createdAt }
+            .map(\.exportText)
+            .joined(separator: "\n\n---\n\n")
     }
 
     func prepareSelectedSimulator() async {
@@ -2468,6 +2681,24 @@ final class AppModel {
 
     private static func loadTouchOverlayVisible() -> Bool {
         UserDefaults.standard.object(forKey: touchOverlayVisibleKey) as? Bool ?? true
+    }
+
+    private static func loadAnnotations() -> [SimulatorAnnotation] {
+        guard let data = UserDefaults.standard.data(forKey: simulatorAnnotationsKey),
+              let annotations = try? JSONDecoder().decode([SimulatorAnnotation].self, from: data) else {
+            return []
+        }
+        return annotations
+    }
+
+    private static func persistAnnotations(_ annotations: [SimulatorAnnotation]) {
+        guard !annotations.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: simulatorAnnotationsKey)
+            return
+        }
+        if let data = try? JSONEncoder().encode(annotations) {
+            UserDefaults.standard.set(data, forKey: simulatorAnnotationsKey)
+        }
     }
 
     private static func loadTelemetryEnabled() -> Bool {

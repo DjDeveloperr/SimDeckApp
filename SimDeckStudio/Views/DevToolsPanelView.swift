@@ -351,6 +351,7 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         configuration.userContentController.addUserScript(Self.disableInputZoomScript)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.scrollView.delegate = context.coordinator
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
@@ -411,6 +412,7 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         coordinator.stopObservingKeyboard()
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "simdeckInspector")
         uiView.navigationDelegate = nil
+        uiView.uiDelegate = nil
         uiView.scrollView.delegate = nil
     }
 
@@ -473,7 +475,7 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         return HTTPCookie(properties: properties)
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, UIScrollViewDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, UIScrollViewDelegate {
         var loadedURL: URL?
         var reloadID: UUID?
         var wrapsInFrame = false
@@ -576,6 +578,34 @@ private struct EmbeddedDevToolsWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             loadState.wrappedValue = DevToolsWebViewState(message: "Inspector failed: \(error.localizedDescription)", isError: true)
             scheduleReload(of: webView)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptAlertPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping () -> Void
+        ) {
+            completionHandler()
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            completionHandler(true)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptTextInputPanelWithPrompt prompt: String,
+            defaultText: String?,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (String?) -> Void
+        ) {
+            completionHandler(defaultText ?? "")
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {

@@ -131,6 +131,29 @@ struct SimDeckAPI: Sendable {
         )
     }
 
+    func accessibilityTree(
+        udid: String,
+        source: String = "auto",
+        maxDepth: Int? = nil,
+        interactiveOnly: Bool = false
+    ) async throws -> AccessibilityTreeResponse {
+        var queryItems: [URLQueryItem] = []
+        if !source.isEmpty {
+            queryItems.append(URLQueryItem(name: "source", value: source))
+        }
+        if let maxDepth {
+            queryItems.append(URLQueryItem(name: "maxDepth", value: String(maxDepth)))
+        }
+        if interactiveOnly {
+            queryItems.append(URLQueryItem(name: "interactiveOnly", value: "true"))
+        }
+        return try await decode(
+            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/accessibility-tree",
+            queryItems: queryItems,
+            cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+        )
+    }
+
     func chromeImage(udid: String, stamp: String? = nil, includeButtons: Bool = true) async throws -> UIImage {
         let data = try await request(
             path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/chrome.png",

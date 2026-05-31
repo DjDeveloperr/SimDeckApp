@@ -36,6 +36,7 @@ struct SimulatorStreamView: View {
     @State private var fullscreenProgress: CGFloat = 0
     @State private var fullscreenDragBase: CGFloat = 0
     @State private var fullscreenDragActive = false
+    @State private var selectedAnnotationElementID: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -75,6 +76,10 @@ struct SimulatorStreamView: View {
                 StreamSimulatorSelectionSheet(model: model)
             case .debugInfo:
                 StreamDebugInfoSheet(model: model)
+            case .annotations:
+                AnnotationsSheet(model: model)
+            case .annotationPrompt(let context):
+                AnnotationPromptSheet(model: model, context: context, onDismiss: clearAnnotationInteractionState)
             }
         }
         .onAppear {
@@ -83,17 +88,26 @@ struct SimulatorStreamView: View {
         .onChange(of: model.selectedSimulatorID) { _, _ in
             keyboardCaptureActive = false
             clearTouchInteractionState()
+            clearAnnotationInteractionState()
+            model.deactivateAnnotationMode()
             applyOrientationPolicy()
         }
         .onChange(of: model.selectedSimulator?.isBooted == true) { _, isBooted in
             if !isBooted {
                 keyboardCaptureActive = false
                 clearTouchInteractionState()
+                clearAnnotationInteractionState()
+                model.deactivateAnnotationMode()
             }
         }
         .onChange(of: model.touchOverlayVisible) { _, isVisible in
             if !isVisible {
                 clearTouchOverlay()
+            }
+        }
+        .onChange(of: model.annotationModeActive) { _, isActive in
+            if !isActive {
+                clearAnnotationInteractionState()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
@@ -154,6 +168,23 @@ struct SimulatorStreamView: View {
 
     private var streamSettingsMenu: some View {
         Menu {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { model.annotationModeActive },
+                    set: { model.setAnnotationModeActive($0) }
+                )) {
+                    Label("Annotation Mode", systemImage: "text.viewfinder")
+                }
+                .disabled(model.selectedSimulator?.isBooted != true || model.endpoint == nil)
+
+                Button {
+                    model.hapticSelection()
+                    presentedSheet = .annotations
+                } label: {
+                    Label(annotationMenuTitle, systemImage: "note.text")
+                }
+            }
+
             Section {
                 Button(role: model.selectedSimulator?.isBooted == true ? .destructive : nil) {
                     if let simulator = model.selectedSimulator {
@@ -253,6 +284,10 @@ struct SimulatorStreamView: View {
         }
     }
 
+    private var annotationMenuTitle: String {
+        model.annotations.isEmpty ? "Annotations" : "Annotations (\(model.annotations.count))"
+    }
+
     private var usesPersistentDevToolsToolbarButton: Bool {
         UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass != .compact
     }
@@ -349,7 +384,11 @@ struct SimulatorStreamView: View {
                 }
 
                 if model.selectedSimulator?.isBooted == true {
-                    StreamTouchInputLayer(screenFrame: layout.screenFrame) { event in
+                    StreamTouchInputLayer(
+                        screenFrame: layout.screenFrame,
+                        annotationTapMode: model.annotationModeActive,
+                        onAnnotationTap: handleAnnotationTap
+                    ) { event in
                         handleTouchEvent(event)
                     }
                     .frame(width: proxy.size.width, height: proxy.size.height)
@@ -365,6 +404,30 @@ struct SimulatorStreamView: View {
                         .position(x: layout.screenFrame.midX, y: layout.screenFrame.midY)
                         .allowsHitTesting(false)
                         .transition(.opacity)
+                }
+
+                if model.selectedSimulator?.isBooted == true,
+                   model.annotationModeActive {
+                    AnnotationOutsideTapLayer(screenFrame: layout.screenFrame) {
+                        clearAnnotationInteractionState()
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+
+                    AnnotationOverlayView(
+                        roots: model.annotationAccessibilityTree?.roots ?? [],
+                        screenFrame: layout.screenFrame,
+                        screenCornerRadius: layout.screenCornerRadius,
+                        maskImage: screenMaskImage,
+                        isLoading: model.annotationAccessibilityLoading,
+                        error: model.annotationAccessibilityError,
+                        selectedID: selectedAnnotationElementID,
+                        onRefresh: {
+                            Task { await model.refreshAnnotationAccessibilityTree(showErrorFeedback: true) }
+                        }
+                    )
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .transition(.opacity)
+
                 }
 
                 if let simulator = model.selectedSimulator, !simulator.isBooted {
@@ -400,6 +463,7 @@ struct SimulatorStreamView: View {
             .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.88, blendDuration: 0), value: fullscreenProgress)
         }
         .background(streamBackground)
+        .ignoresSafeArea(.keyboard, edges: .bottom)
     }
 
     private var fullscreenGestureEnabled: Bool {
@@ -474,6 +538,7 @@ struct SimulatorStreamView: View {
     }
 
     private func handleTouchEvent(_ event: StreamTouchEvent) {
+        updateAnnotationLiveRefresh(event)
         if event.updatesOverlay {
             updateTouchOverlay(event)
         }
@@ -499,6 +564,39 @@ struct SimulatorStreamView: View {
                 y2: Double(event.points[1].normalized.y),
                 phase: event.phase
             )
+        }
+    }
+
+    private func handleAnnotationTap(_ point: StreamTouchPoint) {
+        guard model.annotationModeActive,
+              let roots = model.annotationAccessibilityTree?.roots else {
+            clearAnnotationInteractionState()
+            return
+        }
+        let contexts = annotationContextsAtPoint(roots: roots, normalizedPoint: point.normalized)
+        guard let firstContext = contexts.first else {
+            clearAnnotationInteractionState()
+            return
+        }
+
+        model.hapticSelection()
+        presentAnnotationPrompt(firstContext)
+    }
+
+    private func presentAnnotationPrompt(_ context: SimulatorAnnotationContext) {
+        selectedAnnotationElementID = context.elementID
+        presentedSheet = .annotationPrompt(context)
+    }
+
+    private func updateAnnotationLiveRefresh(_ event: StreamTouchEvent) {
+        guard model.annotationModeActive else { return }
+        switch event.phase {
+        case "began", "moved":
+            model.startAnnotationLiveRefresh()
+        case "ended", "cancelled":
+            model.stopAnnotationLiveRefresh()
+        default:
+            break
         }
     }
 
@@ -587,6 +685,10 @@ struct SimulatorStreamView: View {
         clearTouchOverlay()
     }
 
+    private func clearAnnotationInteractionState() {
+        selectedAnnotationElementID = nil
+    }
+
     private func updateKeyboardHeight(_ notification: Notification) {
         let endFrame = (notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue ?? .zero
         let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.28
@@ -611,8 +713,21 @@ private enum StreamTouchEventKind {
 private enum StreamSheet: Identifiable {
     case simulators
     case debugInfo
+    case annotations
+    case annotationPrompt(SimulatorAnnotationContext)
 
-    var id: Self { self }
+    var id: String {
+        switch self {
+        case .simulators:
+            return "simulators"
+        case .debugInfo:
+            return "debugInfo"
+        case .annotations:
+            return "annotations"
+        case .annotationPrompt(let context):
+            return "annotationPrompt-\(context.elementID)"
+        }
+    }
 }
 
 private struct StreamTouchPoint {
@@ -653,7 +768,11 @@ struct StreamTouchInputDebugHarness: View {
             Color.black.ignoresSafeArea()
 
             GeometryReader { proxy in
-                StreamTouchInputLayer(screenFrame: CGRect(origin: .zero, size: proxy.size)) { event in
+                StreamTouchInputLayer(
+                    screenFrame: CGRect(origin: .zero, size: proxy.size),
+                    annotationTapMode: false,
+                    onAnnotationTap: { _ in }
+                ) { event in
                     handle(event)
                 }
             }
@@ -736,26 +855,79 @@ private extension StreamTouchEventKind {
 }
 #endif
 
+private struct AnnotationOutsideTapLayer: UIViewRepresentable {
+    let screenFrame: CGRect
+    let onTap: () -> Void
+
+    func makeUIView(context: Context) -> AnnotationOutsideTapView {
+        let view = AnnotationOutsideTapView()
+        view.screenFrame = screenFrame
+        view.onTap = onTap
+        return view
+    }
+
+    func updateUIView(_ view: AnnotationOutsideTapView, context: Context) {
+        view.screenFrame = screenFrame
+        view.onTap = onTap
+    }
+}
+
+private final class AnnotationOutsideTapView: UIView {
+    var screenFrame: CGRect = .zero
+    var onTap: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isMultipleTouchEnabled = false
+        isOpaque = false
+        accessibilityIdentifier = "annotation-outside-tap-layer"
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        screenFrame.width > 0 && screenFrame.height > 0 && !screenFrame.contains(point)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        onTap?()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
+}
+
 private struct StreamTouchInputLayer: UIViewRepresentable {
     let screenFrame: CGRect
+    let annotationTapMode: Bool
+    let onAnnotationTap: (StreamTouchPoint) -> Void
     let onEvent: (StreamTouchEvent) -> Void
 
     func makeUIView(context: Context) -> StreamTouchInputView {
         let view = StreamTouchInputView()
         view.screenFrame = screenFrame
+        view.annotationTapMode = annotationTapMode
+        view.onAnnotationTap = onAnnotationTap
         view.onEvent = onEvent
         return view
     }
 
     func updateUIView(_ view: StreamTouchInputView, context: Context) {
         view.screenFrame = screenFrame
+        view.annotationTapMode = annotationTapMode
+        view.onAnnotationTap = onAnnotationTap
         view.onEvent = onEvent
     }
 }
 
 private final class StreamTouchInputView: UIView {
     var onEvent: ((StreamTouchEvent) -> Void)?
+    var onAnnotationTap: ((StreamTouchPoint) -> Void)?
     var screenFrame: CGRect = .zero
+    var annotationTapMode = false
 
     private enum ActiveGesture {
         case single(kind: StreamTouchEventKind, touch: UITouch)
@@ -772,6 +944,7 @@ private final class StreamTouchInputView: UIView {
     private var pendingSingleKind: StreamTouchEventKind?
     private var pendingSingleSamples: [(phase: String, point: StreamTouchPoint)] = []
     private var suppressSingleUntilAllTouchesEnd = false
+    private let annotationTapMovementThreshold: CGFloat = 8
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -854,7 +1027,17 @@ private final class StreamTouchInputView: UIView {
     }
 
     private func finishTouches(_ touches: Set<UITouch>, phase: String) {
-        if pendingSingleTouch != nil, touches.contains(where: isPendingSingleTouch) {
+        if finishPendingAnnotationTapIfNeeded(touches, phase: phase) {
+            removeTouches(touches)
+            if activeTouches.isEmpty {
+                cancelPendingSingleTouch()
+                suppressSingleUntilAllTouchesEnd = false
+                activeGesture = nil
+                lastMultiPoints = []
+                touchIDs = [:]
+            }
+            return
+        } else if pendingSingleTouch != nil, touches.contains(where: isPendingSingleTouch) {
             activatePendingSingleTouch()
         } else if pendingSingleTouch != nil, activeTouches.count >= 2 {
             cancelPendingSingleTouch()
@@ -911,7 +1094,9 @@ private final class StreamTouchInputView: UIView {
             )
         )
 
-        activatePendingSingleTouch()
+        if !annotationTapMode {
+            activatePendingSingleTouch()
+        }
     }
 
     private func appendPendingSingleMoveIfNeeded(for touches: Set<UITouch>) -> Bool {
@@ -937,6 +1122,9 @@ private final class StreamTouchInputView: UIView {
                     dispatchesInput: false
                 )
             )
+            if annotationTapMode, pendingSingleExceededTapMovement(point) {
+                activatePendingSingleTouch()
+            }
         }
         return true
     }
@@ -975,6 +1163,55 @@ private final class StreamTouchInputView: UIView {
             }
         }
         return true
+    }
+
+    private func finishPendingAnnotationTapIfNeeded(_ touches: Set<UITouch>, phase: String) -> Bool {
+        guard annotationTapMode,
+              let pendingSingleTouch,
+              activeGesture == nil,
+              touches.contains(where: { $0 === pendingSingleTouch }) else {
+            return false
+        }
+
+        guard let point = touchPoint(for: pendingSingleTouch) else {
+            cancelPendingSingleTouch()
+            return true
+        }
+
+        pendingSingleSamples.append((phase: phase, point: point))
+        onEvent?(
+            StreamTouchEvent(
+                kind: pendingSingleKind ?? .single,
+                phase: phase,
+                points: [point],
+                dispatchesInput: false
+            )
+        )
+
+        if pendingSingleExceededTapMovement(point) {
+            activatePendingSingleTouch()
+            if let active = activeGesture {
+                switch active {
+                case .single(let kind, let touch):
+                    sendSingleTouch(kind: kind, touch: touch, phase: phase)
+                case .multi:
+                    break
+                }
+            }
+        } else if phase == "ended" {
+            onAnnotationTap?(point)
+            cancelPendingSingleTouch()
+        } else {
+            cancelPendingSingleTouch()
+        }
+        return true
+    }
+
+    private func pendingSingleExceededTapMovement(_ point: StreamTouchPoint) -> Bool {
+        guard let first = pendingSingleSamples.first?.point else { return false }
+        let dx = point.local.x - first.local.x
+        let dy = point.local.y - first.local.y
+        return hypot(dx, dy) > annotationTapMovementThreshold
     }
 
     private func cancelPendingSingleTouch() {
@@ -1573,7 +1810,7 @@ private struct StreamControlButtons: View {
     private var iosControls: some View {
         StreamHardwareControlButton("Home", systemImage: "house", buttonName: "home", model: model)
 
-        StreamControlButton("Switcher", systemImage: "square.on.square") { model.sendAppSwitcher() }
+        StreamAppSwitcherOrAnnotationButton(model: model)
 
         Spacer(minLength: 4)
 
@@ -1638,7 +1875,7 @@ private struct StreamControlButtons: View {
     private var visionControls: some View {
         StreamHardwareControlButton("Home", systemImage: "house", buttonName: "home", model: model)
 
-        StreamControlButton("Switcher", systemImage: "square.on.square") { model.sendAppSwitcher() }
+        StreamAppSwitcherOrAnnotationButton(model: model)
 
         Spacer(minLength: 4)
 
@@ -1653,7 +1890,7 @@ private struct StreamControlButtons: View {
 
         StreamHardwareControlButton("Home", systemImage: "house", buttonName: "home", model: model)
 
-        StreamControlButton("Switcher", systemImage: "square.on.square") { model.sendAppSwitcher() }
+        StreamAppSwitcherOrAnnotationButton(model: model)
 
         Spacer(minLength: 4)
 
@@ -1847,6 +2084,32 @@ private struct StreamControlButton: View {
     }
 }
 
+private struct StreamAppSwitcherOrAnnotationButton: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        if model.annotationModeActive {
+            Button {
+                model.hapticSelection()
+                model.setAnnotationModeActive(false)
+            } label: {
+                StreamControlIconLabel(
+                    title: "Disable Annotations",
+                    systemImage: "text.viewfinder",
+                    foregroundColor: .red
+                )
+            }
+            .buttonStyle(.plain)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Disable Annotations")
+        } else {
+            StreamControlButton("Switcher", systemImage: "square.on.square") {
+                model.sendAppSwitcher()
+            }
+        }
+    }
+}
+
 private struct StreamHardwareControlButton: View {
     let title: LocalizedStringKey
     let systemImage: String
@@ -1938,13 +2201,14 @@ private struct StreamSoftwareKeyboardControlButton: View {
 private struct StreamControlIconLabel: View {
     let title: LocalizedStringKey
     let systemImage: String
+    var foregroundColor: Color = .primary
 
     @ViewBuilder
     var body: some View {
         let content = Label(title, systemImage: systemImage)
             .labelStyle(.iconOnly)
             .font(.body)
-            .foregroundStyle(.primary)
+            .foregroundStyle(foregroundColor)
             .frame(width: 44, height: 44)
             .contentShape(Circle())
         if #available(iOS 26.0, *) {
