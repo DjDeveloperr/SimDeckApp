@@ -8,6 +8,7 @@ struct AnnotationOverlayView: View {
     let maskImage: UIImage?
     let isLoading: Bool
     let error: String
+    let isDimmed: Bool
     let selectedID: String?
     let onRefresh: () -> Void
 
@@ -24,6 +25,8 @@ struct AnnotationOverlayView: View {
             ZStack(alignment: .topLeading) {
                 annotationScreen
                     .frame(width: screenFrame.width, height: screenFrame.height)
+                    .opacity(isDimmed ? annotationDimmedOverlayOpacityMultiplier : 1)
+                    .animation(.easeOut(duration: 0.12), value: isDimmed)
                     .annotationScreenClip(cornerRadius: screenCornerRadius, maskImage: maskImage)
                     .position(x: screenFrame.midX, y: screenFrame.midY)
 
@@ -304,19 +307,19 @@ private struct AnnotationElementRect: View {
         }
         let ratio = areaRatio
         if ratio <= 0.015 {
-            return 0.72
+            return 0.56
         }
         if ratio <= 0.08 {
-            return 0.5
+            return 0.38
         }
         if ratio <= 0.22 {
-            return 0.32
+            return 0.23
         }
-        return 0.18
+        return 0.12
     }
 
     private var contrastOpacity: Double {
-        areaRatio <= 0.08 ? 0.32 : 0.16
+        areaRatio <= 0.08 ? 0.22 : 0.1
     }
 
     private var areaRatio: Double {
@@ -1208,6 +1211,7 @@ private let generatedOrdinalPrefixes: Set<String> = [
 
 private let annotationOverlayMaxItems = 360
 private let annotationOverlayFallbackItemCount = 80
+private let annotationDimmedOverlayOpacityMultiplier = 0.4
 private let annotationBlue = Color(red: 0.2, green: 0.65, blue: 0.95)
 
 private extension Dictionary where Key == String, Value == JSONValue {

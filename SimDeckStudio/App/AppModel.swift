@@ -171,6 +171,7 @@ final class AppModel {
     var annotationAccessibilityTree: AccessibilityTreeResponse?
     var annotationAccessibilityError = ""
     var annotationAccessibilityLoading = false
+    var annotationOverlayDimmed = false
     var annotations = AppModel.loadAnnotations() {
         didSet {
             Self.persistAnnotations(annotations)
@@ -211,6 +212,7 @@ final class AppModel {
     @ObservationIgnored private var annotationRequestGeneration = 0
     @ObservationIgnored private var annotationLiveRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var annotationFastRefreshActive = false
+    @ObservationIgnored private var annotationOverlayRestorePending = false
     @ObservationIgnored private var annotationPreferredSource: String?
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var proxyReadinessTask: Task<Void, Never>?
@@ -994,15 +996,21 @@ final class AppModel {
         annotationLiveRefreshTask?.cancel()
         annotationLiveRefreshTask = nil
         annotationFastRefreshActive = false
+        annotationOverlayRestorePending = false
         annotationModeActive = false
         annotationAccessibilityTree = nil
         annotationAccessibilityError = ""
         annotationAccessibilityLoading = false
+        annotationOverlayDimmed = false
         annotationPreferredSource = nil
     }
 
-    func startAnnotationLiveRefresh() {
+    func startAnnotationLiveRefresh(dimStaleOverlay: Bool = false) {
         annotationFastRefreshActive = true
+        if dimStaleOverlay {
+            annotationOverlayDimmed = true
+            annotationOverlayRestorePending = false
+        }
         ensureAnnotationRefreshLoop()
     }
 
@@ -1018,6 +1026,9 @@ final class AppModel {
 
     func stopAnnotationLiveRefresh(refreshAfterStopping: Bool = true) {
         annotationFastRefreshActive = false
+        if annotationOverlayDimmed {
+            annotationOverlayRestorePending = true
+        }
         guard refreshAfterStopping, annotationModeActive else { return }
         Task { await refreshAnnotationAccessibilityTree() }
     }
@@ -1054,6 +1065,10 @@ final class AppModel {
                 return
             }
             annotationAccessibilityTree = tree
+            if annotationOverlayRestorePending {
+                annotationOverlayDimmed = false
+                annotationOverlayRestorePending = false
+            }
             if tree.roots.isEmpty {
                 annotationAccessibilityError = tree.fallbackReason?.nilIfBlank ?? "No inspectable elements found."
             }
@@ -1065,6 +1080,8 @@ final class AppModel {
                 return
             }
             annotationAccessibilityTree = nil
+            annotationOverlayDimmed = false
+            annotationOverlayRestorePending = false
             annotationAccessibilityError = error.localizedDescription
             if showErrorFeedback {
                 status = error.localizedDescription
@@ -1248,10 +1265,12 @@ final class AppModel {
                 videoSize = CGSize(width: video.width, height: video.height)
             }
             status = "WebRTC connected."
-            Metrics.track(.streamConnected, properties: Metrics.endpointProperties(endpoint).merging(
+            let streamConnectedEvent: MetricsEvent = automaticReconnect ? .streamRecovered : .streamConnected
+            Metrics.track(streamConnectedEvent, properties: Metrics.endpointProperties(endpoint).merging(
                 Metrics.simulatorProperties(selectedSimulator)
             ) { current, _ in current }.merging([
                 "automatic_reconnect": automaticReconnect,
+                "connection_phase": automaticReconnect ? "recovery" : "start",
                 "stream_encoder": effectiveStreamConfig.encoder.rawValue,
                 "stream_fps": effectiveStreamConfig.fps,
                 "stream_quality": effectiveStreamConfig.quality.rawValue
@@ -1264,11 +1283,16 @@ final class AppModel {
             guard streamRequestGeneration == generation else { return false }
             streamState = .failed
             status = error.localizedDescription
-            Metrics.track(.streamConnectFailed, properties: Metrics.endpointProperties(endpoint).merging(
+            let streamIssueEvent: MetricsEvent = automaticReconnect ? .streamRecoveryRetry : .streamStartUnavailable
+            Metrics.track(streamIssueEvent, properties: Metrics.endpointProperties(endpoint).merging(
                 Metrics.simulatorProperties(selectedSimulator)
             ) { current, _ in current }.merging([
                 "automatic_reconnect": automaticReconnect,
-                "error_kind": Metrics.errorKind(error)
+                "connection_phase": automaticReconnect ? "recovery" : "start",
+                "error_kind": Metrics.errorKind(error),
+                "recovery_reason": streamReconnectReason.nilIfBlank ?? "unknown",
+                "will_retry": true,
+                "stream_reconnects": streamReconnects
             ]) { current, _ in current })
             if !automaticReconnect {
                 hapticWarning()
@@ -1559,6 +1583,17 @@ final class AppModel {
         sendKey(keyCode: 42, modifiers: 0)
     }
 
+    func hotReloadSelectedSimulator() {
+        guard selectedSimulatorID != nil, selectedSimulator?.isBooted == true else {
+            status = selectedSimulator == nil ? "Select a simulator first." : "Start the simulator first."
+            hapticWarning()
+            return
+        }
+        hapticSelection()
+        sendKeyboardText("R")
+        status = "Sent Hot Reload (R)."
+    }
+
     func dismissSimulatorKeyboard() {
         let sent = streamClient?.dismissSimulatorKeyboard() ?? false
         guard !sent else { return }
@@ -1801,6 +1836,13 @@ final class AppModel {
     func scheduleStreamReconnect(reason: String) {
         guard endpoint != nil, selectedSimulatorID != nil, selectedSimulator?.isBooted == true else { return }
         guard streamState != .connecting else { return }
+        Metrics.track(.streamRecoveryScheduled, properties: Metrics.endpointProperties(endpoint).merging(
+            Metrics.simulatorProperties(selectedSimulator)
+        ) { current, _ in current }.merging([
+            "recovery_reason": reason,
+            "stream_state": streamState.rawValue,
+            "stream_reconnects": streamReconnects
+        ]) { current, _ in current })
         reconnectTask?.cancel()
         reconnectTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1860,7 +1902,7 @@ final class AppModel {
                         return
                     }
                 } else {
-                    self.status = self.serverStatusMessage ?? "Starting Mac..."
+                    self.status = self.serverStatusMessage ?? "Starting server..."
                 }
 
                 let delay = attempt < 20 ? 2.0 : 5.0
@@ -1897,7 +1939,7 @@ final class AppModel {
                 usagePage: usagePage,
                 usage: usage
             )
-            let encodedID = selectedSimulatorID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? selectedSimulatorID
+            let encodedID = SimDeckAPI.simulatorPathComponent(selectedSimulatorID)
             try await SimDeckAPI(endpoint: endpoint).postControl(payload, path: "/api/simulators/\(encodedID)/button")
         } catch {
             status = error.localizedDescription
@@ -1909,7 +1951,7 @@ final class AppModel {
         guard let endpoint, let selectedSimulatorID else { return }
         do {
             let payload = KeyControlPayload(keyCode: keyCode, modifiers: modifiers)
-            let encodedID = selectedSimulatorID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? selectedSimulatorID
+            let encodedID = SimDeckAPI.simulatorPathComponent(selectedSimulatorID)
             try await SimDeckAPI(endpoint: endpoint).postControl(payload, path: "/api/simulators/\(encodedID)/key")
         } catch {
             status = error.localizedDescription
@@ -1925,7 +1967,7 @@ final class AppModel {
     private func postDismissKeyboard() async {
         guard let endpoint, let selectedSimulatorID else { return }
         do {
-            let encodedID = selectedSimulatorID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? selectedSimulatorID
+            let encodedID = SimDeckAPI.simulatorPathComponent(selectedSimulatorID)
             try await SimDeckAPI(endpoint: endpoint).postControl(
                 EmptyControlPayload(),
                 path: "/api/simulators/\(encodedID)/dismiss-keyboard"
@@ -1946,7 +1988,7 @@ final class AppModel {
                 usagePage: nil,
                 usage: nil
             )
-            let encodedID = selectedSimulatorID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? selectedSimulatorID
+            let encodedID = SimDeckAPI.simulatorPathComponent(selectedSimulatorID)
             try await SimDeckAPI(endpoint: endpoint).postControl(payload, path: "/api/simulators/\(encodedID)/button")
         } catch {
             status = error.localizedDescription
@@ -1957,7 +1999,7 @@ final class AppModel {
     private func postToggleAppearance() async {
         guard let endpoint, let selectedSimulatorID else { return }
         do {
-            let encodedID = selectedSimulatorID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? selectedSimulatorID
+            let encodedID = SimDeckAPI.simulatorPathComponent(selectedSimulatorID)
             try await SimDeckAPI(endpoint: endpoint).postControl(
                 EmptyControlPayload(),
                 path: "/api/simulators/\(encodedID)/toggle-appearance"
@@ -1972,7 +2014,7 @@ final class AppModel {
         guard let endpoint, let selectedSimulatorID else { return }
         do {
             let payload = CrownControlPayload(delta: delta)
-            let encodedID = selectedSimulatorID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? selectedSimulatorID
+            let encodedID = SimDeckAPI.simulatorPathComponent(selectedSimulatorID)
             try await SimDeckAPI(endpoint: endpoint).postControl(
                 payload,
                 path: "/api/simulators/\(encodedID)/crown"

@@ -534,7 +534,7 @@ private struct SidebarView: View {
            model.simulators.isEmpty {
             return serverStatusMessage
         }
-        return "No Simulators"
+        return "No Devices"
     }
 
     private var emptySimulatorSystemImage: String {
@@ -544,7 +544,7 @@ private struct SidebarView: View {
             return "clock.arrow.circlepath"
         }
         return selectedSimulatorTypeFilter?.systemImage
-            ?? (searchText.isEmpty ? "iphone.slash" : "magnifyingglass")
+            ?? (searchText.isEmpty ? "rectangle.stack.badge.minus" : "magnifyingglass")
     }
 
     private var simulatorSelection: Binding<String?> {
@@ -2052,7 +2052,7 @@ private struct ConnectServerSheet: View {
         NavigationStack {
             Form {
                 Section("Server") {
-                    TextField("Host or Studio URL", text: $model.manualAddress)
+                    TextField("Mac/Linux Host or Studio URL", text: $model.manualAddress)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)

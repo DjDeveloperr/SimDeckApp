@@ -39,6 +39,12 @@ struct SimDeckAPI: Sendable {
     let endpoint: SimDeckEndpoint
     var baseURL: URL { endpoint.baseURL }
 
+    static func simulatorPathComponent(_ simulatorID: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/%?#")
+        return simulatorID.addingPercentEncoding(withAllowedCharacters: allowed) ?? simulatorID
+    }
+
     func health(timeout: TimeInterval = 5) async throws -> HealthResponse {
         try await decode(path: "/api/health", timeout: timeout)
     }
@@ -85,7 +91,7 @@ struct SimDeckAPI: Sendable {
 
     func bootSimulator(udid: String, timeout: TimeInterval = 300) async throws {
         let _: EmptyResponse = try await decode(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/boot",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/boot",
             method: "POST",
             body: Optional<String>.none,
             timeout: timeout
@@ -94,7 +100,7 @@ struct SimDeckAPI: Sendable {
 
     func shutdownSimulator(udid: String) async throws {
         let _: EmptyResponse = try await decode(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/shutdown",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/shutdown",
             method: "POST",
             body: Optional<String>.none,
             timeout: 120
@@ -103,7 +109,7 @@ struct SimDeckAPI: Sendable {
 
     func postWebRTCOffer(_ offer: WebRTCOfferPayload, udid: String) async throws -> WebRTCAnswerPayload {
         try await decode(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/webrtc/offer",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/webrtc/offer",
             method: "POST",
             body: offer,
             timeout: 20
@@ -112,21 +118,21 @@ struct SimDeckAPI: Sendable {
 
     func chromeProfile(udid: String) async throws -> ChromeProfile {
         try await decode(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/chrome-profile",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/chrome-profile",
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
         )
     }
 
     func webKitTargets(udid: String) async throws -> WebKitTargetDiscovery {
         try await decode(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/webkit/targets",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/webkit/targets",
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
         )
     }
 
     func chromeDevToolsTargets(udid: String) async throws -> ChromeDevToolsTargetDiscovery {
         try await decode(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/devtools/targets",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/devtools/targets",
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
         )
     }
@@ -148,7 +154,7 @@ struct SimDeckAPI: Sendable {
             queryItems.append(URLQueryItem(name: "interactiveOnly", value: "true"))
         }
         return try await decode(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/accessibility-tree",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/accessibility-tree",
             queryItems: queryItems,
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
         )
@@ -156,7 +162,7 @@ struct SimDeckAPI: Sendable {
 
     func chromeImage(udid: String, stamp: String? = nil, includeButtons: Bool = true) async throws -> UIImage {
         let data = try await request(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/chrome.png",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/chrome.png",
             method: "GET",
             body: Optional<String>.none,
             timeout: 10,
@@ -174,7 +180,7 @@ struct SimDeckAPI: Sendable {
 
     func chromeButtonImage(udid: String, button: String, pressed: Bool, stamp: String? = nil) async throws -> UIImage {
         let data = try await request(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/chrome-button/\(button.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? button).png",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/chrome-button/\(Self.simulatorPathComponent(button)).png",
             method: "GET",
             body: Optional<String>.none,
             timeout: 10,
@@ -192,7 +198,7 @@ struct SimDeckAPI: Sendable {
 
     func screenMaskImage(udid: String, stamp: String? = nil) async throws -> UIImage {
         let data = try await request(
-            path: "/api/simulators/\(udid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? udid)/screen-mask.png",
+            path: "/api/simulators/\(Self.simulatorPathComponent(udid))/screen-mask.png",
             method: "GET",
             body: Optional<String>.none,
             timeout: 10,
@@ -322,9 +328,9 @@ struct SimDeckAPI: Sendable {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             return baseURL.appendingPathComponent(path)
         }
-        let prefix = components.path.trimmingTrailingSlashes()
+        let prefix = components.percentEncodedPath.trimmingTrailingSlashes()
         let suffix = path.hasPrefix("/") ? path : "/\(path)"
-        components.path = "\(prefix)\(suffix)"
+        components.percentEncodedPath = "\(prefix)\(suffix)"
         if !queryItems.isEmpty {
             components.queryItems = (components.queryItems ?? []) + queryItems
         }

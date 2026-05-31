@@ -169,6 +169,15 @@ struct SimulatorStreamView: View {
     private var streamSettingsMenu: some View {
         Menu {
             Section {
+                Button {
+                    model.hotReloadSelectedSimulator()
+                } label: {
+                    Label("Hot Reload (R)", systemImage: "arrow.clockwise")
+                }
+                .disabled(model.selectedSimulator?.isBooted != true || model.endpoint == nil)
+            }
+
+            Section {
                 Toggle(isOn: Binding(
                     get: { model.annotationModeActive },
                     set: { model.setAnnotationModeActive($0) }
@@ -420,6 +429,7 @@ struct SimulatorStreamView: View {
                         maskImage: screenMaskImage,
                         isLoading: model.annotationAccessibilityLoading,
                         error: model.annotationAccessibilityError,
+                        isDimmed: model.annotationOverlayDimmed,
                         selectedID: selectedAnnotationElementID,
                         onRefresh: {
                             Task { await model.refreshAnnotationAccessibilityTree(showErrorFeedback: true) }
@@ -591,8 +601,10 @@ struct SimulatorStreamView: View {
     private func updateAnnotationLiveRefresh(_ event: StreamTouchEvent) {
         guard model.annotationModeActive else { return }
         switch event.phase {
-        case "began", "moved":
+        case "began":
             model.startAnnotationLiveRefresh()
+        case "moved":
+            model.startAnnotationLiveRefresh(dimStaleOverlay: true)
         case "ended", "cancelled":
             model.stopAnnotationLiveRefresh()
         default:
