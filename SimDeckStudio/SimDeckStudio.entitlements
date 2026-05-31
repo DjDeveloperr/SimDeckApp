@@ -4,7 +4,8 @@
 <dict>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
-		<string>applinks:simdeck.djdev.me</string>
+		<string>applinks:ci.simdeck.sh</string>
+		<string>applinks:app.simdeck.sh</string>
 	</array>
 </dict>
 </plist>

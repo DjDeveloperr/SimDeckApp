@@ -2333,7 +2333,7 @@ final class AppModel {
         merged.token = preferred.token ?? other.token
         merged.preferredSimulatorID = preferred.preferredSimulatorID ?? other.preferredSimulatorID
         merged.requiresPairing = preferred.requiresPairing && other.requiresPairing
-        merged.customName = preferred.customName ?? other.customName
+        merged.customName = lhs.customName?.nilIfBlank ?? rhs.customName?.nilIfBlank
         if let hostName = merged.hostName?.nilIfBlank {
             merged.name = hostName
         }

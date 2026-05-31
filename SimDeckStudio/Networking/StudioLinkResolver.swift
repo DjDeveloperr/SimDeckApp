@@ -13,6 +13,12 @@ enum StudioLinkResolver {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
             return nil
         }
+        if let ciSession = ciProxySession(from: url) {
+            return .ciSession(ciSession, autoStart: shouldAutoStart(url) || ciSession.device?.nilIfBlank != nil)
+        }
+        if let endpoint = endpointFromLaunchpadURL(url) {
+            return .endpoint(endpoint, autoStart: shouldAutoStart(url, endpoint: endpoint))
+        }
         if let endpoint = endpointFromStudioURL(url) {
             return .endpoint(endpoint, autoStart: shouldAutoStart(url, endpoint: endpoint))
         }
@@ -151,6 +157,126 @@ enum StudioLinkResolver {
         )
     }
 
+    /// Parses Universal Links served by the launchpad at https://app.simdeck.sh.
+    ///
+    /// The launchpad lets a user (or agent) build a deeplink that targets a specific
+    /// simdeck server + simulator, and then either opens the iOS app via a universal
+    /// link or hands a `simdeck://` URL off to whatever tool is forwarding the link
+    /// (Codex/Claude/etc.). The launchpad URL carries the *target* host as query
+    /// params; the URL host itself is always `app.simdeck.sh` and should never be
+    /// used as the endpoint base.
+    ///
+    /// Recognized paths: `/open`, `/connect`, `/pair`. Required params: `host`.
+    /// Optional: `port`, `scheme` (default `http`), `udid`/`device`, `serverId`/`sid`/`s`,
+    /// `hostId`/`hid`, `hostName`/`hname`, `serverKind`/`kind`, `token`, plus `code`/`pairingCode`
+    /// when path is `/pair`.
+    private static func endpointFromLaunchpadURL(_ url: URL) -> SimDeckEndpoint? {
+        guard isLaunchpadHost(url.host(percentEncoded: false)) else { return nil }
+        let path = url.path.lowercased()
+        let isOpenPath = path.hasPrefix("/open") || path.hasPrefix("/connect") || path.hasPrefix("/pair")
+        guard isOpenPath else { return nil }
+        guard let targetHost = queryValue("host", in: url)?.nilIfBlank else { return nil }
+        let scheme = (queryValue("scheme", in: url)?.lowercased()).flatMap { value in
+            ["http", "https"].contains(value) ? value : nil
+        } ?? "http"
+        let port = queryValue("port", in: url).flatMap(Int.init)
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = targetHost
+        components.port = port
+        guard let baseURL = components.url else { return nil }
+        let serverID = queryValue("serverId", in: url) ?? queryValue("sid", in: url) ?? queryValue("s", in: url)
+        let hostID = queryValue("hostId", in: url) ?? queryValue("hid", in: url)
+        let hostName = queryValue("hostName", in: url) ?? queryValue("hname", in: url)
+        let serverKind = queryValue("serverKind", in: url) ?? queryValue("kind", in: url)
+        let token = queryValue("token", in: url) ?? queryValue("simdeckToken", in: url)
+        return SimDeckEndpoint(
+            name: hostName?.nilIfBlank ?? targetHost,
+            baseURL: baseURL,
+            source: source(for: targetHost),
+            token: token,
+            preferredSimulatorID: queryValue("device", in: url) ?? queryValue("udid", in: url),
+            serverID: serverID,
+            hostID: hostID,
+            hostName: hostName,
+            serverKind: serverKind
+        )
+    }
+
+    private static func isLaunchpadHost(_ host: String?) -> Bool {
+        host?.lowercased() == "app.simdeck.sh"
+    }
+
+    private static func ciProxySession(from url: URL) -> CIProxySession? {
+        guard isCIProxyHost(url.host(percentEncoded: false)),
+              let encodedRedirect = queryValue("redirect", in: url),
+              let decodedData = encodedRedirect.base64URLDecodedData,
+              let decodedValue = String(data: decodedData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !decodedValue.isEmpty else {
+            return nil
+        }
+
+        if decodedValue.hasPrefix("http://") || decodedValue.hasPrefix("https://") {
+            return ciProxySession(fromDecodedURLString: decodedValue)
+        }
+
+        guard let payloadData = decodedValue.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(CIProxySessionPayload.self, from: payloadData),
+              payload.v == 1,
+              let upstream = normalizedCIUpstream(payload.upstream) else {
+            return nil
+        }
+
+        let device = queryValue("device", in: url) ?? payload.device
+        return CIProxySession(
+            upstream: upstream,
+            token: payload.token?.nilIfBlank,
+            tokenCipher: payload.tokenCipher,
+            device: device,
+            platform: payload.platform,
+            repo: payload.repo,
+            pr: payload.pr,
+            runID: payload.runId,
+            expiresAt: payload.expiresAt
+        )
+    }
+
+    private static func ciProxySession(fromDecodedURLString value: String) -> CIProxySession? {
+        guard let components = URLComponents(string: value),
+              let url = components.url,
+              let upstream = normalizedCIUpstream(url.absoluteString) else {
+            return nil
+        }
+        let token = components.queryItems?.first { $0.name == "simdeckToken" }?.value?.nilIfBlank
+        let device = components.queryItems?.first { $0.name == "device" }?.value?.nilIfBlank
+        return CIProxySession(
+            upstream: upstream,
+            token: token,
+            tokenCipher: nil,
+            device: device,
+            platform: nil,
+            repo: nil,
+            pr: nil,
+            runID: nil,
+            expiresAt: nil
+        )
+    }
+
+    private static func normalizedCIUpstream(_ value: String?) -> URL? {
+        guard let value, var components = URLComponents(string: value) else { return nil }
+        guard components.scheme?.lowercased() == "https", components.host?.nilIfBlank != nil else {
+            return nil
+        }
+        components.path = components.path == "/" ? "" : components.path
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    private static func isCIProxyHost(_ host: String?) -> Bool {
+        host?.lowercased() == "ci.simdeck.sh"
+    }
+
     private static func queryValue(_ name: String, in url: URL) -> String? {
         URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?
@@ -205,4 +331,17 @@ enum StudioLinkResolver {
         guard parts.count == 4 else { return false }
         return parts[0] == 100 && (parts[1] & 0b1100_0000) == 0b0100_0000
     }
+}
+
+private struct CIProxySessionPayload: Decodable {
+    let v: Int
+    let upstream: String
+    let token: String?
+    let tokenCipher: CIProxyTokenCipher?
+    let device: String?
+    let platform: String?
+    let repo: String?
+    let pr: String?
+    let runId: String?
+    let expiresAt: String?
 }

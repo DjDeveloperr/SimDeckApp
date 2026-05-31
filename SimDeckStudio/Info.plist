@@ -63,6 +63,25 @@
 	<string>SimDeck discovers and connects to simulator streams on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SimDeck uses WebRTC to connect to simulator streams. Microphone access is only used for WebRTC features that send audio from this device.</string>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>org.nativescript.simdeck.pair</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Pair</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>checkmark.seal</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>org.nativescript.simdeck.scan-qr</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Scan QR</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>qrcode.viewfinder</string>
+		</dict>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

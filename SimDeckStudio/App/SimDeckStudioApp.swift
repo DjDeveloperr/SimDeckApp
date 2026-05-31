@@ -2,6 +2,39 @@ import SwiftUI
 import UIKit
 import CoreSpotlight
 
+@discardableResult
+private func handleSimDeckShortcutType(_ type: String) -> Bool {
+    switch type {
+    case "org.nativescript.simdeck.pair":
+        SimDeckShortcutActionStore.request(.pair)
+        return true
+    case "org.nativescript.simdeck.scan-qr":
+        SimDeckShortcutActionStore.request(.scanPairingQR)
+        return true
+    default:
+        return false
+    }
+}
+
+final class SimDeckSceneDelegate: NSObject, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        if let shortcut = connectionOptions.shortcutItem {
+            handleSimDeckShortcutType(shortcut.type)
+        }
+    }
+
+    func windowScene(
+        _ windowScene: UIWindowScene,
+        performActionFor shortcutItem: UIApplicationShortcutItem,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let handled = handleSimDeckShortcutType(shortcutItem.type)
+        completionHandler(handled)
+    }
+}
+
 final class AppOrientationDelegate: NSObject, UIApplicationDelegate {
     static var supportedOrientations: UIInterfaceOrientationMask = .portrait
 
@@ -10,6 +43,35 @@ final class AppOrientationDelegate: NSObject, UIApplicationDelegate {
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         Self.supportedOrientations
+    }
+
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        configuration.delegateClass = SimDeckSceneDelegate.self
+        return configuration
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        if let shortcut = launchOptions?[.shortcutItem] as? UIApplicationShortcutItem {
+            handleSimDeckShortcutType(shortcut.type)
+        }
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        performActionFor shortcutItem: UIApplicationShortcutItem,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let handled = handleSimDeckShortcutType(shortcutItem.type)
+        completionHandler(handled)
     }
 }
 
@@ -66,6 +128,9 @@ struct SimDeckStudioApp: App {
                 model.handle(url: url)
             }
             .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                model.handle(userActivity: activity)
+            }
+            .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
                 model.handle(userActivity: activity)
             }
             .onChange(of: scenePhase) { _, phase in

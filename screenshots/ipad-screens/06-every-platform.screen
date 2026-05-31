@@ -1,0 +1,38 @@
+<Screen size="2064x2752">
+  <Background color="#f4f1e8" />
+  <Text
+    size="150"
+    weight="800"
+    color="#111312"
+    align="center"
+    tracking="-4"
+    lineHeight="1"
+    maxWidth="1760"
+    width="1760"
+    position="absolute"
+    x="152"
+    y="112">
+    Watch. iPad.\nApple TV.
+  </Text>
+  <Device
+    model="iphone-17-pro-iphone18-1"
+    width="610"
+    screenshot="../shots/IMG_5170.PNG"
+    position="absolute"
+    x="74"
+    y="1360" />
+  <Device
+    model="iphone-17-pro-iphone18-1"
+    width="860"
+    screenshot="../shots/IMG_5177.PNG"
+    position="absolute"
+    x="602"
+    y="500" />
+  <Device
+    model="iphone-17-pro-iphone18-1"
+    width="600"
+    screenshot="../shots/IMG_5175.PNG"
+    position="absolute"
+    x="1386"
+    y="1030" />
+</Screen>

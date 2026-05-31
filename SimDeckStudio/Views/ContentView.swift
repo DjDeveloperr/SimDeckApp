@@ -1379,6 +1379,14 @@ private enum SimDeckAppIcon: String, CaseIterable, Identifiable {
         }
     }
 
+    var color: Color {
+        switch self {
+        case .default: return .blue
+        case .light: return .orange
+        case .dark: return .indigo
+        }
+    }
+
     static var current: SimDeckAppIcon {
         switch UIApplication.shared.alternateIconName {
         case "AppIcon-Light": return .light
@@ -1401,10 +1409,21 @@ private struct SettingsSheet: View {
                 Section("App Icon") {
                     Picker(selection: $iconSelection) {
                         ForEach(SimDeckAppIcon.allCases) { icon in
-                            Label(icon.displayName, systemImage: icon.systemImage).tag(icon)
+                            Label {
+                                Text(icon.displayName)
+                            } icon: {
+                                Image(systemName: icon.systemImage)
+                                    .foregroundStyle(icon.color)
+                            }
+                            .tag(icon)
                         }
                     } label: {
-                        Label("App Icon", systemImage: iconSelection.systemImage)
+                        Label {
+                            Text("App Icon")
+                        } icon: {
+                            Image(systemName: iconSelection.systemImage)
+                                .foregroundStyle(iconSelection.color)
+                        }
                     }
                     .pickerStyle(.menu)
                     .onChange(of: iconSelection) { _, selection in

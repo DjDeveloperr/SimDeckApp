@@ -1,0 +1,7 @@
+.DS_Store
+opencode.json
+.asc
+.kiro
+dist/
+ipad-dist/
+out/

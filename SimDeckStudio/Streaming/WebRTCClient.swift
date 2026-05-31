@@ -188,13 +188,13 @@ final class WebRTCClient: NSObject {
     @discardableResult
     func sendTouch(x: Double, y: Double, phase: String) -> Bool {
         markUserActivity()
-        return sendJSON(["type": "touch", "x": x, "y": y, "phase": phase], allowQueue: false)
+        return sendJSON(["type": "touch", "x": x, "y": y, "phase": phase], allowQueue: phase != "moved")
     }
 
     @discardableResult
     func sendEdgeTouch(x: Double, y: Double, phase: String, edge: String) -> Bool {
         markUserActivity()
-        return sendJSON(["type": "edgeTouch", "x": x, "y": y, "phase": phase, "edge": edge], allowQueue: false)
+        return sendJSON(["type": "edgeTouch", "x": x, "y": y, "phase": phase, "edge": edge], allowQueue: phase != "moved")
     }
 
     @discardableResult
@@ -207,7 +207,7 @@ final class WebRTCClient: NSObject {
             "x2": x2,
             "y2": y2,
             "phase": phase
-        ], allowQueue: false)
+        ], allowQueue: phase != "moved")
     }
 
     @discardableResult

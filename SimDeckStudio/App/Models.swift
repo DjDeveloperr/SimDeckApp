@@ -132,6 +132,7 @@ struct SimDeckEndpoint: Identifiable, Hashable, Codable, Sendable {
         serverID: String? = nil,
         hostID: String? = nil,
         hostName: String? = nil,
+        customName: String? = nil,
         serverKind: String? = nil,
         alternateBaseURLs: [URL] = []
     ) {
@@ -145,6 +146,7 @@ struct SimDeckEndpoint: Identifiable, Hashable, Codable, Sendable {
         self.serverID = serverID?.nilIfBlank
         self.hostID = hostID?.nilIfBlank
         self.hostName = hostName?.nilIfBlank
+        self.customName = customName?.nilIfBlank
         self.serverKind = serverKind?.nilIfBlank
         self.alternateBaseURLs = alternateBaseURLs
             .map { $0.normalizedSimDeckBaseURL() }
@@ -161,6 +163,7 @@ struct SimDeckEndpoint: Identifiable, Hashable, Codable, Sendable {
         case serverID
         case hostID = "hostId"
         case hostName
+        case customName
         case serverKind
         case alternateBaseURLs
     }
@@ -177,6 +180,7 @@ struct SimDeckEndpoint: Identifiable, Hashable, Codable, Sendable {
             serverID: try container.decodeIfPresent(String.self, forKey: .serverID),
             hostID: try container.decodeIfPresent(String.self, forKey: .hostID),
             hostName: try container.decodeIfPresent(String.self, forKey: .hostName),
+            customName: try container.decodeIfPresent(String.self, forKey: .customName),
             serverKind: try container.decodeIfPresent(String.self, forKey: .serverKind),
             alternateBaseURLs: try container.decodeIfPresent([URL].self, forKey: .alternateBaseURLs) ?? []
         )
